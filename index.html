@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Climate Neighbours</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- Illustrated sky for the selected place. Blurred ellipses read as soft
+     cloud banks; sun, haze and rain fade in from the city's own climate. -->
+<div id="sky" aria-hidden="true">
+  <svg viewBox="0 0 1600 900" preserveAspectRatio="xMidYMin slice">
+    <defs>
+      <radialGradient id="sunGlow" cx="50%" cy="50%">
+        <stop offset="0%"  stop-color="var(--sun-core)"  stop-opacity=".95"/>
+        <stop offset="45%" stop-color="var(--sun-core)"  stop-opacity=".28"/>
+        <stop offset="100%" stop-color="var(--sun-core)" stop-opacity="0"/>
+      </radialGradient>
+      <linearGradient id="hazeGrad" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="var(--haze)" stop-opacity="0"/>
+        <stop offset="100%" stop-color="var(--haze)" stop-opacity=".5"/>
+      </linearGradient>
+      <filter id="soft" x="-30%" y="-60%" width="160%" height="240%">
+        <feGaussianBlur stdDeviation="42"/>
+      </filter>
+      <filter id="softer" x="-30%" y="-60%" width="160%" height="240%">
+        <feGaussianBlur stdDeviation="74"/>
+      </filter>
+    </defs>
+
+    <g class="sun">
+      <circle cx="1290" cy="176" r="290" fill="url(#sunGlow)"/>
+      <circle cx="1290" cy="176" r="52" fill="var(--sun-core)" opacity=".7" filter="url(#soft)"/>
+    </g>
+
+    <g class="clouds">
+      <g class="cl cl-back" filter="url(#softer)" fill="var(--cloud-far)">
+        <ellipse cx="250"  cy="180" rx="330" ry="98"/>
+        <ellipse cx="700"  cy="120" rx="290" ry="82"/>
+        <ellipse cx="1180" cy="200" rx="360" ry="104"/>
+      </g>
+      <g class="cl cl-mid" filter="url(#soft)" fill="var(--cloud-mid)">
+        <ellipse cx="430"  cy="250" rx="250" ry="70"/>
+        <ellipse cx="980"  cy="215" rx="230" ry="62"/>
+        <ellipse cx="1460" cy="290" rx="240" ry="66"/>
+      </g>
+      <g class="cl cl-near" filter="url(#soft)" fill="var(--cloud-near)">
+        <ellipse cx="150"  cy="330" rx="210" ry="54"/>
+        <ellipse cx="760"  cy="360" rx="240" ry="58"/>
+        <ellipse cx="1330" cy="340" rx="200" ry="50"/>
+      </g>
+    </g>
+
+    <g class="rain" stroke="var(--rain-col)" stroke-width="1.6" stroke-linecap="round"></g>
+    <rect class="haze" x="0" y="300" width="1600" height="600" fill="url(#hazeGrad)"/>
+  </svg>
+</div>
+
+<header class="bar">
+  <div class="brand">Climate&nbsp;Neighbours</div>
+  <div class="bar-right">
+    <button id="ovBtn" class="pill" title="Overall ranking across all parameters">Overall</button>
+    <button id="favBtn" class="pill" title="Favourites">&#9734;</button>
+    <select id="year" class="pill" title="Year"></select>
+    <button id="unit" class="pill" title="Toggle units">°C</button>
+  </div>
+</header>
+
+<section id="start" class="screen">
+  <div class="hero">
+    <h1>Where else feels like this?</h1>
+    <p class="sub">Pick a place, pick a number &mdash; temperature, dew point, rain,
+       wind, feels-like &mdash; and see the places on Earth sitting closest to
+       that exact value.</p>
+
+    <div class="entry">
+      <button id="locate" class="primary">Use my location</button>
+      <span class="or">or</span>
+      <div class="searchwrap">
+        <input id="q" type="search" placeholder="Search any city, town or village"
+               autocomplete="off" spellcheck="false" disabled>
+        <ul id="suggest" class="suggest" hidden></ul>
+      </div>
+    </div>
+
+    <div id="recents" class="recents" hidden></div>
+    <p id="startNote" class="note">Loading places&hellip;</p>
+  </div>
+</section>
+
+<section id="profile" class="screen" hidden>
+  <button class="back" data-goto="start">&larr; Change place</button>
+  <div class="place">
+    <h2 id="placeName"></h2>
+    <p id="placeMeta" class="meta"></p>
+    <button id="favStar" class="favstar" type="button"></button>
+    <div id="placeExtras" class="place-extras"></div>
+    <div id="placeSimilar" class="place-similar"></div>
+  </div>
+  <p class="hint">Click any figure to find the places closest to it.</p>
+  <div id="metricGrid" class="grid"></div>
+  <p class="source" id="profileSource"></p>
+</section>
+
+<section id="overall" class="screen" hidden>
+  <button class="back" data-goto="profile">&larr; Back to place</button>
+  <div class="cmp-head">
+    <div>
+      <h2>Overall ranking</h2>
+      <p id="ovSub" class="meta"></p>
+    </div>
+    <div class="periods" id="ovWeights"></div>
+  </div>
+  <div id="ovProgress" class="progress" hidden><span class="spin"></span><span>Scoring every place&hellip;</span></div>
+  <div id="ovResults" class="results"></div>
+  <p class="source" id="ovSource"></p>
+</section>
+
+<section id="favs" class="screen" hidden>
+  <button class="back" data-goto="profile">&larr; Back</button>
+  <div class="cmp-head">
+    <div>
+      <h2>Your favourite places</h2>
+      <p id="favSub" class="meta"></p>
+    </div>
+    <div class="periods" id="favPeriods"></div>
+  </div>
+  <div id="favResults" class="results"></div>
+  <p class="source" id="favSource"></p>
+</section>
+
+<section id="compare" class="screen" hidden>
+  <button class="back" data-goto="profile">&larr; Back to place</button>
+
+  <div class="cmp-head">
+    <div>
+      <h2 id="cmpTitle"></h2>
+      <p id="cmpSub" class="meta"></p>
+    </div>
+    <div class="periods" id="periods"></div>
+  </div>
+
+  <div class="workspace">
+    <div>
+      <details id="refine" class="refine" open>
+        <summary><span id="refineLabel">Refine by other measures</span></summary>
+        <div id="refineBody" class="refine-body"></div>
+      </details>
+    </div>
+    <div>
+      <div id="progress" class="progress" hidden><span class="spin"></span><span id="phase"></span></div>
+      <div id="results" class="results"></div>
+    </div>
+  </div>
+  <p class="source" id="cmpSource"></p>
+</section>
+
+<!-- Plain scripts, not modules: file:// blocks module scripts and fetch(). -->
+<script src="data/cities.js"></script>
+<script src="data/pm25.js"></script>
+<script src="data/liveability.js"></script>
+<div id="statusbar" class="statusbar" hidden>
+  <div class="sb-left">
+    <span class="sb-place" id="sbPlace"></span>
+    <span class="sb-sep"></span>
+    <span class="sb-item" id="sbMetric"></span>
+    <span class="sb-item" id="sbPeriod"></span>
+    <span class="sb-item" id="sbYear"></span>
+    <span class="sb-item" id="sbSun"></span>
+  </div>
+  <div class="sb-right">
+    <span class="sb-item" id="sbFilters"></span>
+    <button class="sb-btn" id="sbFav" type="button"></button>
+    <button class="sb-btn" id="sbClear" type="button" hidden>Clear filters</button>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

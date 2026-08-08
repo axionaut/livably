@@ -1,0 +1,11 @@
+# Downloaded source data — regenerate with the scripts in tools/
+data/raw/
+
+# Local test output
+dev-shots/
+
+# Python / editors
+venv/
+__pycache__/
+*.pyc
+.DS_Store
