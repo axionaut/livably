@@ -56,8 +56,8 @@ var METRICS = {
   air_quality: {
     icon: '<path d="M4 8h11a3 3 0 1 0-3-3"/><path d="M2 12h15a3 3 0 1 1-3 3"/><path d="M6 16h7a2.5 2.5 0 1 1-2.5 2.5"/>',
     tint: "#c084fc", label: "Air quality", unit: "µg/m³",
-    vars: [], statik: "pm25", annual: "mean", dp: 1,
-    note: "Annual mean PM2.5, SatPM2.5 V6.GL.03 (ACAG) — same value for every month",
+    vars: [], statik: "pm25", monthly: true, annual: "mean", dp: 1,
+    note: "PM2.5 from SatPM2.5 V6.GL.03 (ACAG), monthly and annual",
     compute: null,
   },
 
@@ -101,10 +101,20 @@ var PM25 = (function () {
   if (!d || !d.b64) return null;
   var bin = atob(d.b64), buf = new ArrayBuffer(bin.length), u8 = new Uint8Array(buf);
   for (var i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
-  var raw = new Int16Array(buf), out = new Float32Array(raw.length);
+  var raw = new Int16Array(buf), all = new Float32Array(raw.length);
   for (var j = 0; j < raw.length; j++)
-    out[j] = raw[j] < 0 ? Infinity : raw[j] / d.scale;   // -1 marks no data
-  return { values: out, year: d.year, source: d.source };
+    all[j] = raw[j] < 0 ? Infinity : raw[j] / d.scale;   // -1 marks no data
+
+  // Slice 0 is the annual mean, slices 1-12 are Jan-Dec.
+  var planes = d.planes || 1, n = all.length / planes;
+  var byPeriod = [];
+  for (var p = 0; p < planes; p++) byPeriod.push(all.subarray(p * n, (p + 1) * n));
+  return {
+    annual: byPeriod[0],
+    month: byPeriod.slice(1),
+    values: byPeriod[0],          // default view stays the annual mean
+    year: d.year, source: d.source,
+  };
 })();
 
 /* Liveability is a country-level score, so every city in a country shares it.
@@ -242,7 +252,15 @@ async function buildIndex(metric, year, period) {
   var spec = METRICS[metric], loaded = {};
 
   if (spec.statik) {
-    var vS = spec.statik === "pm25" ? (PM25 && PM25.values) : livValues();
+    var vS;
+    if (spec.statik === "pm25") {
+      // Air quality has real monthly fields, so it follows the period like
+      // every other measure. Liveability genuinely has none, so it does not.
+      vS = PM25 && (period >= 0 && PM25.month.length === 12
+                      ? PM25.month[period] : PM25.annual);
+    } else {
+      vS = livValues();
+    }
     if (!vS) throw new Error(spec.label + " data not loaded");
     var ordS = new Uint32Array(N);
     for (var c0 = 0; c0 < N; c0++) ordS[c0] = c0;
@@ -601,8 +619,10 @@ var svgIcon = function (inner) {
 };
 
 var phase = function (t) { var e = $("#phase"); if (e) e.textContent = t; };
+var lastAnchorValue = null;
+
 function paintStatus() {
-  var bar = $("#statusbar");
+  var bar = $("#barStatus");
   if (!bar) return;
   var onStart = $("#start") && !$("#start").hidden;
   bar.hidden = onStart || !state.city;
@@ -613,8 +633,17 @@ function paintStatus() {
     + (state.city.country ? ", " + state.city.country : "");
   $("#sbMetric").innerHTML = svgIcon(spec.icon) + spec.label;
   $("#sbMetric").style.setProperty("--tint", spec.tint);
-  $("#sbPeriod").textContent = state.period < 0 ? "Annual" : MONTHS[state.period];
+  $("#sbPeriod").textContent = (spec.statik && !spec.monthly) ? "Annual"
+    : state.period < 0 ? "Annual" : MONTHS[state.period];
   $("#sbYear").textContent = state.year;
+
+  // The whole point of a status strip is the number, not just the label.
+  var vEl = $("#sbValue");
+  if (lastAnchorValue != null && isFinite(lastAnchorValue)) {
+    vEl.hidden = false;
+    vEl.innerHTML = fmt(lastAnchorValue, state.metric)
+      + '<span class="bs-u">' + unitOf(state.metric) + "</span>";
+  } else vEl.hidden = true;
   applyDaylight(state.city);
 
   var bits = [];
@@ -625,6 +654,7 @@ function paintStatus() {
   if (nr) bits.push(nr + " range" + (nr === 1 ? "" : "s"));
   $("#sbFilters").textContent = bits.length ? bits.join(" · ") : "No filters";
   $("#sbClear").hidden = !bits.length;
+  $("#sbFilters").hidden = !bits.length;
 
   var fav = isFav(state.city.id);
   $("#sbFav").textContent = fav ? "★ Saved" : "☆ Save";
@@ -920,7 +950,7 @@ function renderProfile(prof, more) {
       + '<div class="v">' + fmt(d.annual, key) + '<span class="u"> ' + unitOf(key) + '</span></div>'
       + (tier ? '<span class="tier ' + tier.cls + '">' + tier.label + "</span>" : "")
       + (spec.derived ? '<div class="tag">derived</div>' : "");
-    if (!spec.statik) card.appendChild(sparkline(d.months));
+    if (!spec.statik || spec.monthly) card.appendChild(sparkline(d.months));
     else {
       var flat = document.createElement("div");
       flat.className = "tag";
@@ -1012,7 +1042,7 @@ function renderPeriods() {
   };
   mk("Year", -1);
   MONTHS.forEach(function (m, i) { mk(m, i); });
-  if (METRICS[state.metric].statik) {
+  if (METRICS[state.metric].statik && !METRICS[state.metric].monthly) {
     Array.prototype.forEach.call(box.querySelectorAll("button"), function (b, i) {
       b.setAttribute("aria-pressed", String(i === 0));
       if (i > 0) {
@@ -1434,10 +1464,10 @@ async function decorateAir(entries) {
 var compareSeq = 0;
 async function runCompare() {
   var mine = ++compareSeq, spec = METRICS[state.metric];
-  // PM2.5 is a single annual figure; there is no monthly field behind it.
-  var period = spec.statik ? -1 : state.period;
+  // Liveability is genuinely annual-only; air quality now has monthly fields.
+  var period = (spec.statik && !spec.monthly) ? -1 : state.period;
   $("#cmpTitle").textContent = spec.label + " closest to " + state.city.name;
-  $("#cmpSub").textContent = (spec.statik ? "annual only" :
+  $("#cmpSub").textContent = ((spec.statik && !spec.monthly) ? "annual only" :
       period < 0 ? "annual" : MONTHS[period]) + " · " + state.year;
   $("#progress").hidden = false;
   phase("Preparing");
@@ -1456,7 +1486,7 @@ async function runCompare() {
 
     // Monthly shape of the active metric — same layer, so this costs no network.
     var monthly = null;
-    if (!spec.statik) {
+    if (!spec.statik || spec.monthly) {
       monthly = [];
       for (var mm = 0; mm < 12; mm++)
         monthly.push((await buildIndex(state.metric, state.year, mm)).values);
@@ -1472,11 +1502,13 @@ async function runCompare() {
         if (!varCache[need[nv] + ":" + state.year]) { have = false; break; }
       if (have) extras.push({ key: mk[e],
         values: (await buildIndex(mk[e], state.year,
-                   METRICS[mk[e]].statik ? -1 : period)).values });
+                   (METRICS[mk[e]].statik && !METRICS[mk[e]].monthly) ? -1 : period)).values });
     }
     if (mine !== compareSeq) return;
 
     var anchor = index.values[state.city.idx];
+    lastAnchorValue = anchor;
+    paintStatus();               // header strip must not lag a period behind
     if (state.metric === "temperature") applyMood(anchor, null);
     else if (state.metric === "dew_point") applyMood(null, anchor);
     applyDaylight(state.city);
@@ -1494,13 +1526,12 @@ async function runCompare() {
 }
 
 function renderResults(index, anchor, nb, monthly, extras) {
-  var m = state.metric, spec = METRICS[m], box = $("#results");
-  box.innerHTML = "";
+  var m = state.metric, spec = METRICS[m];
+  var slot = $("#anchorSlot"), lowBox = $("#lowerCol"), highBox = $("#higherCol");
+  slot.innerHTML = ""; lowBox.innerHTML = ""; highBox.innerHTML = "";
+  var box = slot;                      // row() appends to whatever box points at
   var visible = [];
 
-  var band = function (t) {
-    var p = document.createElement("p"); p.className = "band"; p.textContent = t; box.appendChild(p);
-  };
   var row = function (entry, isAnchor) {
     var idx = isAnchor ? state.city.idx : entry.idx;
     var c = describe(idx), value = index.values[idx];
@@ -1577,18 +1608,19 @@ function renderResults(index, anchor, nb, monthly, extras) {
     box.appendChild(el);
   };
 
-  // Read the list as one continuous scale: coolest/lowest at the top, the
-  // selected place in the middle, highest at the bottom.
-  if (nb.below.length) {
-    band("Lower — " + nb.below.length + " steps down");
-    nb.below.slice().reverse().forEach(function (e) { row(e, false); });
-  }
-  band(state.city.name);
+  // Your place sits on top; the two directions read away from it in parallel.
+  box = slot;
   row(null, true);
-  if (nb.above.length) {
-    band("Higher — " + nb.above.length + " steps up");
-    nb.above.forEach(function (e) { row(e, false); });
-  }
+
+  $("#lowerBand").textContent = nb.below.length
+    ? "Lower \u2014 " + nb.below.length + " steps down" : "Nothing lower";
+  $("#higherBand").textContent = nb.above.length
+    ? "Higher \u2014 " + nb.above.length + " steps up" : "Nothing higher";
+
+  box = lowBox;
+  nb.below.forEach(function (e) { row(e, false); });
+  box = highBox;
+  nb.above.forEach(function (e) { row(e, false); });
 
   decorateAir(visible);
 

@@ -60,6 +60,18 @@
 
 <header class="bar">
   <div class="brand">Livably</div>
+  <div class="barstatus" id="barStatus" hidden>
+    <span class="bs-place" id="sbPlace"></span>
+    <span class="bs-val" id="sbValue"></span>
+    <span class="bs-item" id="sbMetric"></span>
+    <span class="bs-item" id="sbPeriod"></span>
+    <span class="bs-item" id="sbYear"></span>
+    <span class="bs-item" id="sbSun"></span>
+    <span class="bs-item bs-filters" id="sbFilters"></span>
+    <button class="sb-btn" id="sbFav" type="button"></button>
+    <button class="sb-btn" id="sbClear" type="button" hidden>Clear filters</button>
+  </div>
+
   <div class="bar-right">
     <button id="ovBtn" class="pill" title="Overall ranking across all parameters">Overall</button>
     <button id="favBtn" class="pill" title="Favourites">&#9734;</button>
@@ -142,18 +154,25 @@
     <div class="periods" id="periods"></div>
   </div>
 
-  <div class="workspace">
-    <div>
-      <details id="refine" class="refine" open>
-        <summary><span id="refineLabel">Refine by other measures</span></summary>
-        <div id="refineBody" class="refine-body"></div>
-      </details>
+  <details id="refine" class="refine">
+    <summary><span id="refineLabel">Refine by other measures</span></summary>
+    <div id="refineBody" class="refine-body"></div>
+  </details>
+
+  <div id="progress" class="progress" hidden><span class="spin"></span><span id="phase"></span></div>
+
+  <div id="anchorSlot" class="anchor-slot"></div>
+  <div class="split">
+    <div class="col">
+      <p class="band" id="lowerBand"></p>
+      <div id="lowerCol"></div>
     </div>
-    <div>
-      <div id="progress" class="progress" hidden><span class="spin"></span><span id="phase"></span></div>
-      <div id="results" class="results"></div>
+    <div class="col">
+      <p class="band" id="higherBand"></p>
+      <div id="higherCol"></div>
     </div>
   </div>
+  <div id="results" hidden></div>
   <p class="source" id="cmpSource"></p>
 </section>
 
@@ -161,22 +180,6 @@
 <script src="data/cities.js"></script>
 <script src="data/pm25.js"></script>
 <script src="data/liveability.js"></script>
-<div id="statusbar" class="statusbar" hidden>
-  <div class="sb-left">
-    <span class="sb-place" id="sbPlace"></span>
-    <span class="sb-sep"></span>
-    <span class="sb-item" id="sbMetric"></span>
-    <span class="sb-item" id="sbPeriod"></span>
-    <span class="sb-item" id="sbYear"></span>
-    <span class="sb-item" id="sbSun"></span>
-  </div>
-  <div class="sb-right">
-    <span class="sb-item" id="sbFilters"></span>
-    <button class="sb-btn" id="sbFav" type="button"></button>
-    <button class="sb-btn" id="sbClear" type="button" hidden>Clear filters</button>
-  </div>
-</div>
-
 <script src="app.js"></script>
 </body>
 </html>
