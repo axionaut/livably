@@ -1,4 +1,4 @@
-# Climate Neighbours
+# Livably
 
 Pick a place. Pick a number — temperature, dew point, rainfall, wind, feels-like,
 humidity. See the settlements on Earth sitting closest to that exact value:

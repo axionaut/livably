@@ -1,4 +1,4 @@
-/* Climate Neighbours — runs from a plain index.html, no server, no build step.
+/* Livably — runs from a plain index.html, no server, no build step.
  *
  * Deliberately a classic script rather than a module: opening index.html as a
  * file:// URL blocks module scripts, workers and fetch(). Everything here uses
@@ -132,7 +132,7 @@ var varCache = {}, indexCache = {}, inflight = {};
 /* Sampled layers persist in IndexedDB, which works on file:// and survives a
    browser restart. Each entry is 12 x 235,157 float32 (~11 MB), so a full set
    of metrics is around 56 MB. */
-var DB = "climate-cache", STORE = "vars";
+var DB = "livably-cache", STORE = "vars";
 function idbOpen() {
   return new Promise(function (res, rej) {
     var r = indexedDB.open(DB, 1);
@@ -356,9 +356,25 @@ function neighbours(index, anchorIdx, n, pass, dp) {
 /* ------------------------------------------------------------------ state */
 
 var YEARS = [2024, 2023, 2022, 2021, 2020];
+var STORE_KEY = "lv.";
+
+/* Settings used to live under the "cn." prefix. Carry them across once so a
+   rename does not quietly wipe saved favourites, filters and last place. */
+(function migrateStore() {
+  try {
+    if (localStorage.getItem(STORE_KEY + "migrated")) return;
+    for (var i = 0; i < localStorage.length; i++) {
+      var k = localStorage.key(i);
+      if (k && k.indexOf("cn.") === 0 && localStorage.getItem(STORE_KEY + k.slice(3)) === null)
+        localStorage.setItem(STORE_KEY + k.slice(3), localStorage.getItem(k));
+    }
+    localStorage.setItem(STORE_KEY + "migrated", "1");
+  } catch (e) { /* private mode, nothing to carry */ }
+})();
+
 var store = {
-  get: function (k, d) { try { var v = JSON.parse(localStorage.getItem("cn." + k)); return v === null ? d : v; } catch (e) { return d; } },
-  set: function (k, v) { try { localStorage.setItem("cn." + k, JSON.stringify(v)); } catch (e) {} },
+  get: function (k, d) { try { var v = JSON.parse(localStorage.getItem(STORE_KEY + k)); return v === null ? d : v; } catch (e) { return d; } },
+  set: function (k, v) { try { localStorage.setItem(STORE_KEY + k, JSON.stringify(v)); } catch (e) {} },
 };
 var state = {
   city: store.get("city", null), metric: store.get("metric", "dew_point"),

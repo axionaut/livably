@@ -30,7 +30,7 @@ WB_PPP = ("https://api.worldbank.org/v2/country/all/indicator/"
 
 def get(url, label):
     print(f"  fetching {label} ...")
-    req = urllib.request.Request(url, headers={"User-Agent": "climate-neighbours/1.0"})
+    req = urllib.request.Request(url, headers={"User-Agent": "livably/1.0"})
     with urllib.request.urlopen(req, timeout=120) as r:
         return r.read()
 
