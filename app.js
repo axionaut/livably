@@ -409,6 +409,25 @@ var POP_TIERS = [[0,"Any size"],[5000,"5k+"],[50000,"50k+"],[250000,"250k+"],[10
 
 var isTemp = function (m) { return METRICS[m].unit === "°C"; };
 var unitOf = function (m) { return isTemp(m) && state.fahrenheit ? "°F" : METRICS[m].unit; };
+// Filter inputs speak whatever unit is on screen; state always stores base.
+/* Totals rescale with the period — 700 mm is a dry year but a soaking month —
+   so the unit has to say which, or the same number means two different things
+   depending on which button is lit. */
+function filterUnit(key) {
+  var spec = METRICS[key];
+  var p = (spec.statik && !spec.monthly) ? -1 : state.period;
+  var base = (isTemp(key) && state.fahrenheit) ? "°F" : spec.unit;
+  if (spec.annual !== "sum") return base;
+  return base + (p < 0 ? "/yr" : "/" + MONTHS[p]);
+}
+
+var toBase = function (v, m) { return (isTemp(m) && state.fahrenheit) ? (v - 32) * 5 / 9 : v; };
+var fromBase = function (v, m) { return (isTemp(m) && state.fahrenheit) ? v * 9 / 5 + 32 : v; };
+var roundTo = function (v, m) {
+  var f = Math.pow(10, METRICS[m].dp);
+  return Math.round(v * f) / f;
+};
+
 var fmt = function (v, m) {
   if (v == null || !isFinite(v)) return "—";
   var x = isTemp(m) && state.fahrenheit ? v * 9 / 5 + 32 : v;
@@ -1373,15 +1392,15 @@ function renderRefine() {
       '<span class="rf-ic" style="color:' + spec.tint + '">' + svgIcon(spec.icon) + "</span>"
       + '<span class="rf-l">' + spec.label + "</span>"
       + '<input class="rf-i" type="number" step="any" placeholder="min"'
-        + (r.min != null ? ' value="' + r.min + '"' : "") + ">"
+        + (r.min != null ? ' value="' + roundTo(fromBase(r.min, key), key) + '"' : "") + ">"
       + '<input class="rf-i" type="number" step="any" placeholder="max"'
-        + (r.max != null ? ' value="' + r.max + '"' : "") + ">"
-      + '<span class="rf-u">' + spec.unit + "</span>";
+        + (r.max != null ? ' value="' + roundTo(fromBase(r.max, key), key) + '"' : "") + ">"
+      + '<span class="rf-u">' + filterUnit(key) + "</span>";
     var ins = wrap.querySelectorAll(".rf-i");
     var upd = function () {
       state.ranges[key] = {
-        min: ins[0].value === "" ? null : +ins[0].value,
-        max: ins[1].value === "" ? null : +ins[1].value,
+        min: ins[0].value === "" ? null : toBase(+ins[0].value, key),
+        max: ins[1].value === "" ? null : toBase(+ins[1].value, key),
       };
       store.set("ranges", state.ranges);
   paintStatus();
@@ -1411,8 +1430,9 @@ function renderRefine() {
 // Values are filtered in the metric's own base unit, which the panel labels.
 function markRefine() {
   var n = activeRanges().length;
-  $("#refineLabel").textContent = n
-    ? "Refine — " + n + " active" : "Refine by other measures";
+  var when = state.period < 0 ? "the year" : MONTHS[state.period];
+  $("#refineLabel").textContent = (n ? "Refine — " + n + " active" : "Refine by other measures")
+    + " · applied to " + when + " " + state.year;
   $("#refine").classList.toggle("on", n > 0);
 }
 
@@ -1479,7 +1499,9 @@ async function runCompare() {
     var act = activeRanges(), bounds = [];
     for (var a = 0; a < act.length; a++) {
       phase("Applying " + METRICS[act[a].metric].label.toLowerCase() + " filter");
-      var bi = await buildIndex(act[a].metric, state.year, state.period);
+      var fspec = METRICS[act[a].metric];
+      var fperiod = (fspec.statik && !fspec.monthly) ? -1 : period;
+      var bi = await buildIndex(act[a].metric, state.year, fperiod);
       bounds.push({ values: bi.values, min: act[a].min, max: act[a].max });
     }
     if (mine !== compareSeq) return;          // a newer request owns the screen
@@ -1664,7 +1686,7 @@ unitBtn.addEventListener("click", function () {
   state.fahrenheit = !state.fahrenheit;
   store.set("fahrenheit", state.fahrenheit);
   paintUnit();
-  if (!$("#compare").hidden) runCompare();
+  if (!$("#compare").hidden) { renderRefine(); runCompare(); }
   else if (!$("#profile").hidden && state.city) selectCity(state.city);
 });
 
