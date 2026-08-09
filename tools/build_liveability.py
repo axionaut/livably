@@ -1,7 +1,7 @@
 """Build data/liveability.js from real, openly-licensed sources.
 
 Every figure here is fetched, never recalled. Sources:
-  visa     passport-index-dataset (ilyankou, ODbL) — entry rules per passport
+  visa     passport-index-data (imorte, MIT) — entry rules per passport
   income   World Bank GDP per capita, PPP (CC BY 4.0) — a wealth proxy,
            NOT a cost-of-living index; labelled as such in the UI
   hdi      UNDP Human Development Index
@@ -22,8 +22,11 @@ OUT = os.path.join(ROOT, "data", "liveability.js")
 BASE = os.environ.get("BASE_ISO2", "IN")
 BASE_CITY = os.environ.get("BASE_CITY", "Dehradun")
 
-PASSPORT = ("https://raw.githubusercontent.com/ilyankou/passport-index-dataset/"
-            "master/passport-index-tidy-iso2.csv")
+# imorte/passport-index-data keeps the same schema and vocabulary as ilyankou's
+# original but is still being refreshed; as of March 2026 it differs on 18
+# destinations for the Indian passport.
+PASSPORT = ("https://raw.githubusercontent.com/imorte/passport-index-data/"
+            "main/passport-index-tidy-iso2.csv")
 WB_PPP = ("https://api.worldbank.org/v2/country/all/indicator/"
           "NY.GDP.PCAP.PP.CD?format=json&per_page=400&mrv=1")
 
@@ -74,7 +77,7 @@ def main():
         n_visa += 1
     countries.setdefault(BASE, {})["visa"] = 100
     print(f"    visa rules for {n_visa} destinations")
-    sources["visa"] = "passport-index-dataset (ODbL)"
+    sources["visa"] = "passport-index-data (imorte, MIT)"
 
     # ---- cost of living proxy -------------------------------------------
     try:

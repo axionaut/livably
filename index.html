@@ -75,7 +75,6 @@
   <div class="bar-right">
     <button id="ovBtn" class="pill" title="Overall ranking across all parameters">Overall</button>
     <button id="favBtn" class="pill" title="Favourites">&#9734;</button>
-    <select id="year" class="pill" title="Year"></select>
     <button id="unit" class="pill" title="Toggle units">°C</button>
   </div>
 </header>
@@ -125,6 +124,7 @@
     </div>
     <div class="periods" id="ovWeights"></div>
   </div>
+  <div class="controls" id="ovControls"></div>
   <div id="ovProgress" class="progress" hidden><span class="spin"></span><span>Scoring every place&hellip;</span></div>
   <div id="ovResults" class="results"></div>
   <p class="source" id="ovSource"></p>
@@ -137,8 +137,8 @@
       <h2>Your favourite places</h2>
       <p id="favSub" class="meta"></p>
     </div>
-    <div class="periods" id="favPeriods"></div>
   </div>
+  <div class="controls" id="favControls"></div>
   <div id="favResults" class="results"></div>
   <p class="source" id="favSource"></p>
 </section>
@@ -151,13 +151,8 @@
       <h2 id="cmpTitle"></h2>
       <p id="cmpSub" class="meta"></p>
     </div>
-    <div class="periods" id="periods"></div>
   </div>
-
-  <details id="refine" class="refine">
-    <summary><span id="refineLabel">Refine by other measures</span></summary>
-    <div id="refineBody" class="refine-body"></div>
-  </details>
+  <div class="controls" id="cmpControls"></div>
 
   <div id="progress" class="progress" hidden><span class="spin"></span><span id="phase"></span></div>
 

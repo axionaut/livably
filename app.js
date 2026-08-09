@@ -196,6 +196,36 @@ function sampleGrid(grid, off, out) {
   }
 }
 
+/* Opening a variable and decoding its time axis is worth doing once: the same
+   metadata answers "which years exist" and "where does this year start". */
+var varMeta = {};
+function openVar(v) {
+  if (varMeta[v]) return varMeta[v];
+  varMeta[v] = (async function () {
+    await deps();
+    var st = await IcechunkStore.open(era5Url(v));
+
+    // CF time: "days since <date>", and the start differs per variable
+    // (t2m begins 1940-01, pr 1940-04). Decode it, never assume an epoch.
+    var tArr = await zarr.open(st.resolve("/time"), { kind: "array" });
+    var units = (tArr.attrs && tArr.attrs.units) || "";
+    var u = /days since (\d{4})-(\d{2})-(\d{2})/.exec(units);
+    if (!u) throw new Error("unexpected time units on " + v + ": " + units);
+    var t0 = await zarr.get(tArr, [zarr.slice(0, 1)]);
+    var first = new Date(Date.UTC(+u[1], +u[2] - 1, +u[3]) + Number(t0.data[0]) * 86400000);
+    // Absolute month numbers turn "does this year fit" into a comparison.
+    return { store: st, firstAbs: first.getUTCFullYear() * 12 + first.getUTCMonth(),
+             months: tArr.shape[0] };
+  })();
+  // Clear the slot on failure, so one bad request doesn't wedge the variable.
+  varMeta[v]["catch"](function () { delete varMeta[v]; });
+  return varMeta[v];
+}
+// Newest year this variable covers from January to December.
+var lastFullYear = function (meta) {
+  return Math.floor((meta.firstAbs + meta.months - 12) / 12);
+};
+
 function loadVariable(v, year) {
   var key = v + ":" + year;
   if (varCache[key]) return Promise.resolve(varCache[key]);
@@ -208,23 +238,13 @@ function loadVariable(v, year) {
       return varCache[key];
     }
 
-    await deps();
+    var meta = await openVar(v);
     phase("Loading " + v + " climate layer");
 
-    var store = await IcechunkStore.open(era5Url(v));
+    var i0 = year * 12 - meta.firstAbs;
+    if (i0 < 0 || i0 + 12 > meta.months) throw new Error(v + " has no data for " + year);
 
-    // CF time: "days since <date>", and the start differs per variable
-    // (t2m begins 1940-01, pr 1940-04). Decode it, never assume an epoch.
-    var tArr = await zarr.open(store.resolve("/time"), { kind: "array" });
-    var units = (tArr.attrs && tArr.attrs.units) || "";
-    var u = /days since (\d{4})-(\d{2})-(\d{2})/.exec(units);
-    if (!u) throw new Error("unexpected time units on " + v + ": " + units);
-    var t0 = await zarr.get(tArr, [zarr.slice(0, 1)]);
-    var first = new Date(Date.UTC(+u[1], +u[2] - 1, +u[3]) + Number(t0.data[0]) * 86400000);
-    var i0 = (year - first.getUTCFullYear()) * 12 - first.getUTCMonth();
-    if (i0 < 0 || i0 + 12 > tArr.shape[0]) throw new Error(v + " has no data for " + year);
-
-    var data = await zarr.open(store.resolve("/" + v), { kind: "array" });
+    var data = await zarr.open(meta.store.resolve("/" + v), { kind: "array" });
     var chunk = await zarr.get(data, [zarr.slice(i0, i0 + 12), null, null]);
     var grid = chunk.data;
 
@@ -242,6 +262,57 @@ function loadVariable(v, year) {
   // Clear the slot either way, so one failure doesn't wedge the metric forever.
   inflight[key]["catch"](function () {})["then"](function () { delete inflight[key]; });
   return inflight[key];
+}
+
+/* ------------------------------------------------------------------- year */
+
+/* The year is not a choice, so the app doesn't offer one. There is a single
+   right answer — the most recent year the archive covers from January to
+   December — and it is read from the archive rather than hard-coded. ERA5
+   lands days behind real time, so the newest year that could possibly be
+   complete is the last one that has finished. */
+var FALLBACK_YEAR = 2024;
+var newestPossibleYear = function () { return new Date().getUTCFullYear() - 1; };
+
+var ERA5_VARS = (function () {
+  var seen = {};
+  Object.keys(METRICS).forEach(function (k) {
+    METRICS[k].vars.forEach(function (v) { seen[v] = 1; });
+  });
+  return Object.keys(seen);
+})();
+
+var yearReady = null;
+function ensureYear() {
+  if (yearReady) return yearReady;
+  var newest = newestPossibleYear(), saved = store.get("dataYear", null);
+
+  // Only ask the archive again when the calendar says a newer year could exist.
+  if (saved && saved.year && saved.checked >= newest) {
+    state.year = saved.year;
+    return (yearReady = Promise.resolve(saved.year));
+  }
+
+  yearReady = (async function () {
+    try {
+      phase("Finding the latest complete year");
+      var metas = await Promise.all(ERA5_VARS.map(openVar));
+      // Every measure must have the year, or the set would be ragged.
+      var y = Math.min.apply(null, metas.map(lastFullYear));
+      if (!isFinite(y)) throw new Error("no complete year in the archive");
+      store.set("dataYear", { year: y, checked: newest });
+      state.year = y;
+    } catch (e) {
+      // Offline with a warm cache still deserves to work: keep what we knew.
+      state.year = (saved && saved.year) || FALLBACK_YEAR;
+    }
+    // Anything already on screen was labelled with a guess; correct it.
+    var scr = currentScreen();
+    if (scr && ctl(scr.ctl)) ctl(scr.ctl).paint();
+    paintStatus();
+    return state.year;
+  })();
+  return yearReady;
 }
 
 // period: 0-11 for a month, -1 for the annual figure.
@@ -373,7 +444,6 @@ function neighbours(index, anchorIdx, n, pass, dp) {
 
 /* ------------------------------------------------------------------ state */
 
-var YEARS = [2024, 2023, 2022, 2021, 2020];
 var STORE_KEY = "lv.";
 
 /* Settings used to live under the "cn." prefix. Carry them across once so a
@@ -394,18 +464,35 @@ var store = {
   get: function (k, d) { try { var v = JSON.parse(localStorage.getItem(STORE_KEY + k)); return v === null ? d : v; } catch (e) { return d; } },
   set: function (k, v) { try { localStorage.setItem(STORE_KEY + k, JSON.stringify(v)); } catch (e) {} },
 };
+/* One list where there used to be one value: a place can be looked for across
+   several continents at once, and the country filter works the same way. */
+var asList = function (k, legacy) {
+  var v = store.get(k, null);
+  if (v && v.length) return v.slice();
+  var old = store.get(legacy, "");
+  return old ? [old] : [];
+};
 var state = {
   city: store.get("city", null), metric: store.get("metric", "dew_point"),
-  period: store.get("period", -1), year: store.get("year", YEARS[0]),
+  period: store.get("period", -1),
+  year: (store.get("dataYear", null) || {}).year || FALLBACK_YEAR,
   fahrenheit: store.get("fahrenheit", false), recents: store.get("recents", []),
   minPop: store.get("minPop", 0),
-  continent: store.get("continent", ""),
-  country: store.get("country", ""),
+  continents: asList("continents", "continent"),
+  countries: asList("countries", "country"),
   // metricKey -> {min, max}; constrains results by other measures too.
   ranges: store.get("ranges", {}),
   favs: store.get("favs", []),
 };
 var POP_TIERS = [[0,"Any size"],[5000,"5k+"],[50000,"50k+"],[250000,"250k+"],[1000000,"1M+"]];
+
+/* One period for the whole app. A measure with no monthly field reads its
+   annual figure, but it never overrides what the rest of the screen shows —
+   pick July for rainfall, switch to settling in, and July is still July. */
+var isAnnualOnly = function (k) { var s = METRICS[k]; return !!(s.statik && !s.monthly); };
+var periodFor = function (k) { return isAnnualOnly(k) ? -1 : state.period; };
+var periodName = function (p) { return p < 0 ? "the year" : MONTHS[p]; };
+var periodLabel = function (p) { return p < 0 ? "Annual" : MONTHS[p]; };
 
 var isTemp = function (m) { return METRICS[m].unit === "°C"; };
 var unitOf = function (m) { return isTemp(m) && state.fahrenheit ? "°F" : METRICS[m].unit; };
@@ -414,8 +501,7 @@ var unitOf = function (m) { return isTemp(m) && state.fahrenheit ? "°F" : METRI
    so the unit has to say which, or the same number means two different things
    depending on which button is lit. */
 function filterUnit(key) {
-  var spec = METRICS[key];
-  var p = (spec.statik && !spec.monthly) ? -1 : state.period;
+  var spec = METRICS[key], p = periodFor(key);
   var base = (isTemp(key) && state.fahrenheit) ? "°F" : spec.unit;
   if (spec.annual !== "sum") return base;
   return base + (p < 0 ? "/yr" : "/" + MONTHS[p]);
@@ -488,15 +574,15 @@ function solarElevation(lat, lon, when) {
 
 function applyDaylight(city) {
   if (!city) return;
-  var el = solarElevation(city.lat, city.lon);
+  var elev = solarElevation(city.lat, city.lon);
   // Civil twilight is the changeover: below -6 degrees it is properly night.
-  var phase = el > 0 ? "day" : el > -6 ? "dusk" : "night";
+  var phase = elev > 0 ? "day" : elev > -6 ? "dusk" : "night";
   document.documentElement.setAttribute("data-daylight", phase);
   var bar = $("#sbSun");
   if (bar) {
     bar.textContent = (phase === "day" ? "☀ Daytime there"
       : phase === "dusk" ? "◑ Twilight there" : "☾ Night there");
-    bar.title = "Sun " + (el >= 0 ? "+" : "") + el.toFixed(0)
+    bar.title = "Sun " + (elev >= 0 ? "+" : "") + elev.toFixed(0)
       + "° above the horizon at " + city.name;
   }
 }
@@ -652,9 +738,10 @@ function paintStatus() {
     + (state.city.country ? ", " + state.city.country : "");
   $("#sbMetric").innerHTML = svgIcon(spec.icon) + spec.label;
   $("#sbMetric").style.setProperty("--tint", spec.tint);
-  $("#sbPeriod").textContent = (spec.statik && !spec.monthly) ? "Annual"
-    : state.period < 0 ? "Annual" : MONTHS[state.period];
+  $("#sbPeriod").textContent = periodLabel(state.period)
+    + (isAnnualOnly(state.metric) && state.period >= 0 ? " (no monthly cycle)" : "");
   $("#sbYear").textContent = state.year;
+  $("#sbYear").title = "Latest complete year in the ERA5 archive";
 
   // The whole point of a status strip is the number, not just the label.
   var vEl = $("#sbValue");
@@ -667,8 +754,8 @@ function paintStatus() {
 
   var bits = [];
   if (state.minPop) bits.push((state.minPop / 1000) + "k+");
-  if (state.country) bits.push((COUNTRIES[state.country] || [state.country])[0]);
-  else if (state.continent) bits.push(state.continent);
+  if (state.countries.length) bits.push(summarise(state.countries.map(countryName)));
+  else if (state.continents.length) bits.push(summarise(state.continents));
   var nr = activeRanges().length;
   if (nr) bits.push(nr + " range" + (nr === 1 ? "" : "s"));
   $("#sbFilters").textContent = bits.length ? bits.join(" · ") : "No filters";
@@ -682,6 +769,9 @@ function paintStatus() {
 
 function show(name) {
   ["start", "profile", "compare", "favs", "overall"].forEach(function (s) { $("#" + s).hidden = s !== name; });
+  // Coming back to the place page after changing the month elsewhere: the
+  // cards are redrawn for the period that is now selected.
+  if (name === "profile" && lastProfile) renderProfile(lastProfile, profileMore);
   window.scrollTo(0, 0);
   paintStatus();
 }
@@ -749,6 +839,7 @@ $("#locate").addEventListener("click", function () {
 async function selectCity(city) {
   state.city = city;
   store.set("city", city);
+  lastProfile = null;                  // the old place's cards are not this one's
   paintStatus();
   state.recents = [city].concat(state.recents.filter(function (c) { return c.id !== city.id; })).slice(0, 6);
   store.set("recents", state.recents);
@@ -763,21 +854,20 @@ async function selectCity(city) {
   applyDaylight(city);
   $("#metricGrid").innerHTML = '<p class="meta">Loading climate data… the first '
     + 'metric pulls a global layer and takes a moment. Later ones are instant.</p>';
-  $("#profileSource").innerHTML = "ERA5 reanalysis, " + state.year
-    + ", 0.25° grid · annual figures are day-weighted means (rainfall is a total). "
-    + '<button id="clearCache" class="linkish">Clear downloaded climate data</button>';
-  $("#clearCache").addEventListener("click", function () {
-    cacheClear().then(function () {
-      varCache = {}; indexCache = {};
-      $("#clearCache").textContent = "Cleared — next metric will re-download.";
-    });
-  });
+  paintProfileSource();
   show("profile");
 
   // Each metric needs its own global layer, so they arrive over tens of seconds.
   // Render them one at a time instead of making the page wait for all of them.
   var token = ++profileSeq;
   try {
+    // Which year that is comes from the archive, so say so once it is known.
+    await ensureYear();
+    if (token !== profileSeq) return;
+    renderPlaceExtras(city);
+    paintProfileSource();
+    paintStatus();
+
     var prof = {}, keys = Object.keys(METRICS);
     for (var i = 0; i < keys.length; i++) {
       var annual = await buildIndex(keys[i], state.year, -1), months = [];
@@ -789,8 +879,9 @@ async function selectCity(city) {
                 prof.dew_point && prof.dew_point.annual);
       applyScene(prof);
       lastProfile = prof;
+      profileMore = i + 1 < keys.length;
       renderSimilar(city);
-      renderProfile(prof, i + 1 < keys.length);
+      renderProfile(prof, profileMore);
     }
   } catch (err) {
     if (token === profileSeq)
@@ -798,7 +889,20 @@ async function selectCity(city) {
   }
 }
 var profileSeq = 0;
-var lastProfile = null;
+var lastProfile = null, profileMore = false;
+
+function paintProfileSource() {
+  $("#profileSource").innerHTML = "ERA5 reanalysis, " + state.year
+    + " — the latest year the archive covers end to end"
+    + " · 0.25° grid · annual figures are day-weighted means (rainfall is a total). "
+    + '<button id="clearCache" class="linkish">Clear downloaded climate data</button>';
+  $("#clearCache").addEventListener("click", function () {
+    cacheClear().then(function () {
+      varCache = {}; indexCache = {}; varMeta = {};
+      $("#clearCache").textContent = "Cleared — next metric will re-download.";
+    });
+  });
+}
 
 function coords(la, lo) {
   return Math.abs(la).toFixed(2) + "°" + (la >= 0 ? "N" : "S") + " "
@@ -897,25 +1001,13 @@ function renderPlaceExtras(city) {
       + encodeURIComponent(city.lat + "," + city.lon) + '">Map</a>';
   box.appendChild(links);
 
-  var yr = document.createElement("label");
-  yr.className = "pe-year";
+  // The year is not a choice — it is whatever the archive last completed.
+  var yr = el("label", "pe-year");
   yr.innerHTML = "<span>Year</span>";
-  var sel = document.createElement("select");
-  sel.className = "pill";
-  YEARS.forEach(function (y) {
-    var o = document.createElement("option");
-    o.value = y; o.textContent = y; o.selected = y === state.year;
-    sel.appendChild(o);
-  });
-  sel.addEventListener("change", function () {
-    state.year = +sel.value;
-    store.set("year", state.year);
-    $("#year").value = String(state.year);
-    selectCity(state.city);
-  });
-  yr.appendChild(sel);
+  var val = el("span", "cchip", String(state.year));
+  val.title = "The latest year ERA5 covers from January to December";
+  yr.appendChild(val);
   box.appendChild(yr);
-
 }
 
 // Rendered once the annual indexes exist, so it can span every loaded measure.
@@ -960,16 +1052,19 @@ function renderProfile(prof, more) {
   Object.keys(METRICS).forEach(function (key) {
     var spec = METRICS[key], d = prof[key];
     if (!d) return;
+    // The place page reads the period you picked, like every other screen.
+    var p = periodFor(key), value = p < 0 ? d.annual : d.months[p];
     var card = document.createElement("button");
     card.className = "card";
-    var tier = spec.comfort ? dewTier(d.annual) : null;
+    var tier = spec.comfort ? dewTier(value) : null;
     card.style.setProperty("--tint", spec.tint);
     card.innerHTML =
-      '<div class="k"><span class="kic">' + svgIcon(spec.icon) + "</span>" + spec.label + (spec.annual === "sum" ? " · yearly total" : "") + '</div>'
-      + '<div class="v">' + fmt(d.annual, key) + '<span class="u"> ' + unitOf(key) + '</span></div>'
+      '<div class="k"><span class="kic">' + svgIcon(spec.icon) + "</span>" + spec.label
+        + (p >= 0 ? " · " + MONTHS[p] : spec.annual === "sum" ? " · yearly total" : "") + '</div>'
+      + '<div class="v">' + fmt(value, key) + '<span class="u"> ' + unitOf(key) + '</span></div>'
       + (tier ? '<span class="tier ' + tier.cls + '">' + tier.label + "</span>" : "")
       + (spec.derived ? '<div class="tag">derived</div>' : "");
-    if (!spec.statik || spec.monthly) card.appendChild(sparkline(d.months));
+    if (!spec.statik || spec.monthly) card.appendChild(sparkline(d.months, p));
     else {
       var flat = document.createElement("div");
       flat.className = "tag";
@@ -1015,22 +1110,36 @@ function rowSpark(monthly, idx, spec) {
   return svg;
 }
 
-function sparkline(months) {
+function sparkline(months, mark) {
   var ns = "http://www.w3.org/2000/svg";
   var svg = document.createElementNS(ns, "svg");
   svg.setAttribute("class", "spark");
   svg.setAttribute("viewBox", "0 0 120 34");
   svg.setAttribute("preserveAspectRatio", "none");
   var lo = Math.min.apply(null, months), hi = Math.max.apply(null, months), span = hi - lo || 1;
+  var x = function (i) { return i / 11 * 118 + 1; };
+  var y = function (v) { return 31 - (v - lo) / span * 28; };
   var line = document.createElementNS(ns, "polyline");
   line.setAttribute("points", months.map(function (v, i) {
-    return (i / 11 * 118 + 1) + "," + (31 - (v - lo) / span * 28);
+    return x(i) + "," + y(v);
   }).join(" "));
   line.setAttribute("fill", "none");
   line.setAttribute("stroke", "currentColor");
   line.setAttribute("stroke-width", "1.6");
   line.setAttribute("opacity", ".55");
   svg.appendChild(line);
+
+  /* The month on the card is the month on the curve. A stem rather than a dot,
+     because the sparkline is drawn with preserveAspectRatio="none" and a circle
+     would come out as an ellipse. */
+  if (mark != null && mark >= 0) {
+    var stem = document.createElementNS(ns, "line");
+    stem.setAttribute("x1", x(mark)); stem.setAttribute("x2", x(mark));
+    stem.setAttribute("y1", y(months[mark])); stem.setAttribute("y2", 33);
+    stem.setAttribute("stroke", "currentColor");
+    stem.setAttribute("stroke-width", "1.6");
+    svg.appendChild(stem);
+  }
   return svg;
 }
 
@@ -1041,68 +1150,9 @@ function openCompare(metric) {
   store.set("metric", metric);
   paintStatus();
   show("compare");
-  renderPeriods();
-  renderRefine();
+  if (ctl("#cmpControls")) ctl("#cmpControls").paint();
+  else renderControls($("#cmpControls"), { measure: true, rerun: runCompare });
   runCompare();
-}
-
-function renderPeriods() {
-  var box = $("#periods");
-  box.innerHTML = "";
-  var mk = function (label, p) {
-    var b = document.createElement("button");
-    b.textContent = label;
-    b.setAttribute("aria-pressed", String(state.period === p));
-    b.addEventListener("click", function () {
-      state.period = p; store.set("period", p);
-  paintStatus(); renderPeriods(); runCompare();
-    });
-    box.appendChild(b);
-  };
-  mk("Year", -1);
-  MONTHS.forEach(function (m, i) { mk(m, i); });
-  if (METRICS[state.metric].statik && !METRICS[state.metric].monthly) {
-    Array.prototype.forEach.call(box.querySelectorAll("button"), function (b, i) {
-      b.setAttribute("aria-pressed", String(i === 0));
-      if (i > 0) {
-        b.disabled = true;
-        b.title = METRICS[state.metric].label + " is an annual figure only";
-      }
-    });
-  }
-
-  var picker = function (title, opts, current, onPick) {
-    var sel = document.createElement("select");
-    sel.className = "pill";
-    sel.title = title;
-    opts.forEach(function (o) {
-      var el = document.createElement("option");
-      el.value = o[0]; el.textContent = o[1];
-      el.selected = String(o[0]) === String(current);
-      sel.appendChild(el);
-    });
-    sel.addEventListener("change", function () { onPick(sel.value); });
-    box.appendChild(sel);
-  };
-
-  picker("Only show places at least this big", POP_TIERS, state.minPop, function (v) {
-    state.minPop = +v; store.set("minPop", state.minPop);
-  paintStatus(); runCompare();
-  });
-
-  var conts = [["", "Anywhere"]];
-  CONTINENTS.forEach(function (c) { conts.push([c, c]); });
-  picker("Limit to a continent", conts, state.continent, function (v) {
-    state.continent = v; state.country = "";      // country belongs to a continent
-    store.set("continent", v); store.set("country", "");
-    renderPeriods(); runCompare();
-  });
-
-  var list = [["", state.continent ? "All of " + state.continent : "Any country"]];
-  countryList(state.continent).forEach(function (c) { list.push(c); });
-  picker("Limit to one country", list, state.country, function (v) {
-    state.country = v; store.set("country", v); runCompare();
-  });
 }
 
 // Continents and countries actually present in the catalogue, named not coded.
@@ -1114,22 +1164,39 @@ var CONTINENTS = (function () {
   return Object.keys(seen).sort();
 })();
 
-function countryList(continent) {
+function countryName(cc) { return (COUNTRIES[cc] || [cc])[0]; }
+
+// Countries within the chosen continents — or all of them, if none is chosen.
+function countryList(continents) {
+  var want = setOf(continents || []);
   return Object.keys(COUNTRIES)
-    .filter(function (cc) { return !continent || COUNTRIES[cc][1] === continent; })
+    .filter(function (cc) { return !continents.length || want[COUNTRIES[cc][1]]; })
     .map(function (cc) { return [cc, COUNTRIES[cc][0]]; })
     .sort(function (a, b) { return a[1] < b[1] ? -1 : 1; });
+}
+
+function setOf(list) {
+  var s = {};
+  for (var i = 0; i < list.length; i++) s[list[i]] = 1;
+  return s;
+}
+function summarise(names) {
+  if (!names.length) return "";
+  if (names.length <= 2) return names.join(" + ");
+  return names[0] + " +" + (names.length - 1);
 }
 
 // Display filters. They decide which rows are worth showing; every place is
 // always ranked and the anchor's value never changes.
 function rowFilter(bounds) {
-  var minPop = state.minPop, cont = state.continent, cc = state.country;
+  var minPop = state.minPop;
+  var cc = state.countries.length ? setOf(state.countries) : null;
+  var cont = state.continents.length ? setOf(state.continents) : null;
   return function (i) {
     var r = rows[i];
     if (minPop && r[7] < minPop) return false;
-    if (cc) { if (r[4] !== cc) return false; }
-    else if (cont) { var m = COUNTRIES[r[4]]; if (!m || m[1] !== cont) return false; }
+    if (cc) { if (!cc[r[4]]) return false; }
+    else if (cont) { var m = COUNTRIES[r[4]]; if (!m || !cont[m[1]]) return false; }
     for (var b = 0; b < bounds.length; b++) {
       var v = bounds[b].values[i];
       if (bounds[b].min != null && v < bounds[b].min) return false;
@@ -1137,6 +1204,30 @@ function rowFilter(bounds) {
     }
     return true;
   };
+}
+
+var anyFilter = function () {
+  return !!(state.minPop || state.continents.length || state.countries.length
+            || activeRanges().length);
+};
+
+function clearFilters() {
+  state.minPop = 0; state.continents = []; state.countries = []; state.ranges = {};
+  store.set("minPop", 0); store.set("continents", []); store.set("countries", []);
+  store.set("ranges", {});
+}
+
+/* Each constraining measure needs its own layer, loaded on demand — and each
+   is read for the period on screen, so a July comparison is refined by July
+   figures. A measure with no monthly cycle contributes its annual value. */
+async function activeBounds() {
+  var act = activeRanges(), bounds = [];
+  for (var a = 0; a < act.length; a++) {
+    phase("Applying " + METRICS[act[a].metric].label.toLowerCase() + " filter");
+    var bi = await buildIndex(act[a].metric, state.year, periodFor(act[a].metric));
+    bounds.push({ values: bi.values, min: act[a].min, max: act[a].max });
+  }
+  return bounds;
 }
 
 // Which other measures are currently constraining the result.
@@ -1151,15 +1242,341 @@ function activeRanges() {
   return out;
 }
 
-var refineTimer;
+/* --------------------------------------------------------------- controls */
+
+function el(tag, cls, text) {
+  var e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = text;
+  return e;
+}
+
+/* A pill that opens a checklist. Continents and countries use the same one, so
+   picking three of either feels identical; a long list gets a filter box. */
+var closePopover = null;
+document.addEventListener("click", function (e) {
+  if (closePopover && !e.target.closest(".mpick")) closePopover();
+});
+document.addEventListener("keydown", function (e) {
+  if (e.key === "Escape" && closePopover) closePopover();
+});
+
+function multiPicker(o) {
+  // o: {empty, title, options:[[value,name]], selected, search, onChange}
+  var wrap = el("div", "mpick");
+  var btn = el("button", "pill mp-btn");
+  btn.type = "button";
+  var pop = el("div", "mp-pop");
+  pop.hidden = true;
+
+  var chosen = setOf(o.selected), boxes = [], commit;
+
+  var paintBtn = function () {
+    var names = o.options.filter(function (p) { return chosen[p[0]]; })
+                         .map(function (p) { return p[1]; });
+    btn.textContent = names.length ? summarise(names) : o.empty;
+    btn.classList.toggle("on", names.length > 0);
+    btn.title = names.length ? names.join(", ") : o.title;
+    count.textContent = names.length
+      ? names.length + " selected" : "Nothing selected — everywhere counts";
+  };
+
+  var head = el("div", "mp-head");
+  var count = el("span", "mp-count");
+  var clr = el("button", "linkish", "Clear");
+  clr.type = "button";
+  clr.addEventListener("click", function () {
+    chosen = {};
+    boxes.forEach(function (b) { b.cb.checked = false; });
+    commit();
+  });
+  head.appendChild(count);
+  head.appendChild(clr);
+  pop.appendChild(head);
+
+  if (o.search) {
+    var s = document.createElement("input");
+    s.type = "search";
+    s.className = "mp-search";
+    s.placeholder = "Filter list…";
+    s.addEventListener("input", function () {
+      var q = s.value.trim().toLowerCase();
+      boxes.forEach(function (b) { b.lab.hidden = !!q && b.name.indexOf(q) < 0; });
+    });
+    pop.appendChild(s);
+  }
+
+  var listBox = el("div", "mp-list");
+  o.options.forEach(function (p) {
+    var lab = el("label", "mp-opt");
+    var cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = !!chosen[p[0]];
+    cb.addEventListener("change", function () {
+      if (cb.checked) chosen[p[0]] = 1; else delete chosen[p[0]];
+      commit();
+    });
+    lab.appendChild(cb);
+    lab.appendChild(el("span", null, p[1]));
+    boxes.push({ cb: cb, lab: lab, name: p[1].toLowerCase() });
+    listBox.appendChild(lab);
+  });
+  pop.appendChild(listBox);
+
+  commit = function () {
+    paintBtn();
+    o.onChange(o.options.filter(function (p) { return chosen[p[0]]; })
+                        .map(function (p) { return p[0]; }));
+  };
+
+  btn.addEventListener("click", function () {
+    var opening = pop.hidden;
+    if (closePopover) closePopover();
+    if (!opening) return;
+    pop.hidden = false;
+    closePopover = function () { pop.hidden = true; closePopover = null; };
+  });
+
+  paintBtn();
+  wrap.appendChild(btn);
+  wrap.appendChild(pop);
+  return wrap;
+}
+
+/* Every screen is driven by the same controls, built here once: the period,
+   the measure, which places count as places, and the range filters. Comparing
+   one measure, reading your favourites and reading the overall ranking all
+   obey the same selection — and a measure added to METRICS later inherits the
+   whole apparatus without a second implementation. */
+var refineOpen = false, refineTimer;
+
+function renderControls(host, o) {
+  // o: {measure: bool, rerun: fn}
+  host.innerHTML = "";
+  var unitEls = {}, periodBtns = [];
+
+  var top = el("div", "ctl-row");
+  top.appendChild(el("span", "ctl-k", "Period"));
+  var periods = el("div", "periods");
+  var mk = function (label, p) {
+    var b = el("button", null, label);
+    b.type = "button";
+    b.addEventListener("click", function () {
+      if (state.period === p) return;
+      state.period = p;
+      store.set("period", p);
+      paint();
+      paintStatus();
+      o.rerun();
+    });
+    periods.appendChild(b);
+    periodBtns.push([b, p]);
+  };
+  mk("Year", -1);
+  MONTHS.forEach(function (m, i) { mk(m, i); });
+  top.appendChild(periods);
+
+  var measureSel = null;
+  if (o.measure) {
+    measureSel = el("select", "pill");
+    measureSel.title = "Measure";
+    Object.keys(METRICS).forEach(function (k) {
+      var op = el("option", null, METRICS[k].label);
+      op.value = k;
+      op.selected = k === state.metric;
+      measureSel.appendChild(op);
+    });
+    measureSel.addEventListener("change", function () {
+      state.metric = measureSel.value;
+      store.set("metric", state.metric);
+      paint();
+      paintStatus();
+      o.rerun();
+    });
+    top.appendChild(measureSel);
+  }
+  host.appendChild(top);
+
+  var note = el("p", "ctl-note");
+  host.appendChild(note);
+
+  var filters = el("div", "ctl-row");
+  host.appendChild(filters);
+
+  var buildFilters = function () {
+    filters.innerHTML = "";
+    filters.appendChild(el("span", "ctl-k", "Places"));
+
+    var size = el("select", "pill");
+    size.title = "Only show places at least this big";
+    POP_TIERS.forEach(function (t) {
+      var op = el("option", null, t[1]);
+      op.value = t[0];
+      op.selected = +t[0] === +state.minPop;
+      size.appendChild(op);
+    });
+    size.addEventListener("change", function () {
+      state.minPop = +size.value;
+      store.set("minPop", state.minPop);
+      paint();
+      paintStatus();
+      o.rerun();
+    });
+    filters.appendChild(size);
+
+    filters.appendChild(multiPicker({
+      empty: "Anywhere", title: "Limit to one or more continents",
+      options: CONTINENTS.map(function (c) { return [c, c]; }),
+      selected: state.continents,
+      onChange: function (list) {
+        state.continents = list;
+        store.set("continents", list);
+        // A country belongs to a continent: drop any that no longer qualifies.
+        var keep = setOf(countryList(list).map(function (p) { return p[0]; }));
+        state.countries = state.countries.filter(function (cc) { return keep[cc]; });
+        store.set("countries", state.countries);
+        // Only the country list is stale — rebuilding the row here would
+        // close the continent list under the finger still ticking it.
+        buildCountries();
+        paint();
+        paintStatus();
+        o.rerun();
+      },
+    }));
+
+    filters.appendChild(countrySlot);
+    buildCountries();
+
+    var clr = el("button", "linkish ctl-clear", "Clear filters");
+    clr.type = "button";
+    clr.addEventListener("click", function () {
+      clearFilters();
+      renderControls(host, o);       // ranges live in the refine panel too
+      paintStatus();
+      o.rerun();
+    });
+    filters.appendChild(clr);
+  };
+
+  var countrySlot = el("span", "mpick-slot");
+  var buildCountries = function () {
+    countrySlot.innerHTML = "";
+    countrySlot.appendChild(multiPicker({
+      empty: state.continents.length ? "All of " + summarise(state.continents)
+                                     : "Any country",
+      title: "Limit to one or more countries", search: true,
+      options: countryList(state.continents),
+      selected: state.countries,
+      onChange: function (list) {
+        state.countries = list;
+        store.set("countries", list);
+        paint();
+        paintStatus();
+        o.rerun();
+      },
+    }));
+  };
+  buildFilters();
+
+  /* Range filters over every other measure. They read the period on screen,
+     which is why each row says which unit and which month it means. */
+  var refine = el("details", "refine");
+  refine.open = refineOpen;
+  refine.addEventListener("toggle", function () { refineOpen = refine.open; });
+  var summary = el("summary");
+  var summaryLabel = el("span");
+  summary.appendChild(summaryLabel);
+  refine.appendChild(summary);
+  var body = el("div", "refine-body");
+  refine.appendChild(body);
+  host.appendChild(refine);
+
+  Object.keys(METRICS).forEach(function (key) {
+    var spec = METRICS[key], r = state.ranges[key] || {};
+    var wrap = el("div", "rf");
+    wrap.innerHTML =
+      '<span class="rf-ic" style="color:' + spec.tint + '">' + svgIcon(spec.icon) + "</span>"
+      + '<span class="rf-l">' + spec.label + "</span>"
+      + '<input class="rf-i" type="number" step="any" placeholder="min"'
+        + (r.min != null ? ' value="' + roundTo(fromBase(r.min, key), key) + '"' : "") + ">"
+      + '<input class="rf-i" type="number" step="any" placeholder="max"'
+        + (r.max != null ? ' value="' + roundTo(fromBase(r.max, key), key) + '"' : "") + ">"
+      + '<span class="rf-u"></span>';
+    unitEls[key] = wrap.querySelector(".rf-u");
+    var ins = wrap.querySelectorAll(".rf-i");
+    var upd = function () {
+      state.ranges[key] = {
+        min: ins[0].value === "" ? null : toBase(+ins[0].value, key),
+        max: ins[1].value === "" ? null : toBase(+ins[1].value, key),
+      };
+      store.set("ranges", state.ranges);
+      paint();
+      paintStatus();
+      clearTimeout(refineTimer);
+      refineTimer = setTimeout(o.rerun, 350);      // settle before recomputing
+    };
+    ins[0].addEventListener("change", upd);
+    ins[1].addEventListener("change", upd);
+    ins[0].addEventListener("input", upd);
+    ins[1].addEventListener("input", upd);
+    body.appendChild(wrap);
+  });
+
+  var clrRanges = el("button", "linkish", "Clear all ranges");
+  clrRanges.type = "button";
+  clrRanges.addEventListener("click", function () {
+    state.ranges = {};
+    store.set("ranges", {});
+    renderControls(host, o);
+    paintStatus();
+    o.rerun();
+  });
+  body.appendChild(clrRanges);
+
+  function paint() {
+    periodBtns.forEach(function (pair) {
+      pair[0].setAttribute("aria-pressed", String(state.period === pair[1]));
+    });
+    if (measureSel) measureSel.value = state.metric;
+
+    var annual = o.measure && isAnnualOnly(state.metric) && state.period >= 0;
+    note.textContent = annual
+      ? METRICS[state.metric].label + " has no monthly cycle, so it reads its annual "
+        + "figure — " + MONTHS[state.period] + " still applies to the filters and to "
+        + "every other measure."
+      : "";
+    note.hidden = !annual;
+
+    Object.keys(unitEls).forEach(function (k) {
+      unitEls[k].textContent = filterUnit(k);
+    });
+
+    var n = activeRanges().length;
+    summaryLabel.textContent =
+      (n ? "Refine — " + n + " active" : "Refine by other measures")
+      + " · applied to " + periodName(state.period) + " " + state.year;
+    refine.classList.toggle("on", n > 0);
+
+    var clearBtn = filters.querySelector(".ctl-clear");
+    if (clearBtn) clearBtn.hidden = !anyFilter();
+  }
+
+  paint();
+  var api = { paint: paint, rebuild: function () { renderControls(host, o); } };
+  host.__ctl = api;
+  return api;
+}
+
+var ctl = function (sel) { var h = $(sel); return h && h.__ctl; };
+
 /* Favourites, side by side on one measure. Same indexes as everything else,
    so this costs no extra network once a measure is loaded. */
+var favSeq = 0;
 async function showFavourites() {
+  var mine = ++favSeq;
   show("favs");
-  var spec = METRICS[state.metric];
-  $("#favSub").textContent = spec.label + " · "
-    + (state.period < 0 ? "annual" : MONTHS[state.period]) + " · " + state.year;
-  renderFavPeriods();
+  if (ctl("#favControls")) ctl("#favControls").paint();
+  else renderControls($("#favControls"), { measure: true, rerun: showFavourites });
 
   var box = $("#favResults");
   if (!state.favs.length) {
@@ -1170,68 +1587,64 @@ async function showFavourites() {
   }
   box.innerHTML = '<p class="meta">Loading…</p>';
 
-  var index = await buildIndex(state.metric, state.year, state.period);
-  var rowsOut = state.favs.map(function (c) {
-    return { city: c, value: index.values[c.idx] };
-  }).sort(function (a, b) { return a.value - b.value; });
+  await ensureYear();
+  var spec = METRICS[state.metric], period = periodFor(state.metric);
+  $("#favSub").textContent = spec.label + " · "
+    + (period < 0 ? "annual" : MONTHS[period]) + " · " + state.year;
 
-  var lo = rowsOut[0].value, hi = rowsOut[rowsOut.length - 1].value, span = hi - lo || 1;
+  var index = await buildIndex(state.metric, state.year, period);
+  var bounds = await activeBounds();
+  if (mine !== favSeq) return;
+
+  // The same filters as everywhere else — a favourite outside them is set
+  // aside rather than silently dropped, because you chose these places.
+  var pass = rowFilter(bounds), shown = [], hidden = 0;
+  state.favs.forEach(function (c) {
+    if (pass(c.idx)) shown.push({ city: c, value: index.values[c.idx] });
+    else hidden++;
+  });
+  shown.sort(function (a, b) { return a.value - b.value; });
+
   box.innerHTML = "";
-  rowsOut.forEach(function (r) {
-    var tier = spec.comfort ? dewTier(r.value) : null;
-    var el = document.createElement("div");
-    el.className = "row fav";
-    el.innerHTML =
-      '<div><div class="nm">' + r.city.name
-        + (tier ? ' <span class="tier ' + tier.cls + '">' + tier.label + "</span>" : "")
-      + '</div><div class="wh">'
-        + [r.city.region, r.city.country].filter(Boolean).join(", ") + "</div></div>"
-      + '<div class="favbar"><span style="width:'
-        + (12 + (r.value - lo) / span * 88).toFixed(1) + '%"></span></div>'
-      + '<div class="val">' + fmt(r.value, state.metric)
-        + '<span class="vu">' + unitOf(state.metric) + "</span></div>"
-      + '<button class="details" type="button">Open</button>'
-      + '<button class="details drop" type="button" title="Remove">✕</button>';
-    el.querySelectorAll(".details")[0].addEventListener("click", function () {
-      selectCity(r.city);
-    });
-    el.querySelector(".drop").addEventListener("click", function () {
-      toggleFav(r.city); showFavourites();
-    });
-    box.appendChild(el);
+  if (!shown.length) {
+    box.innerHTML = '<p class="meta">All ' + hidden + " of your favourites are outside "
+      + "the current filters.</p>";
+  }
+  var lo = shown.length ? shown[0].value : 0;
+  var hi = shown.length ? shown[shown.length - 1].value : 1;
+  var span = hi - lo || 1;
+  var anchorValue = state.city ? index.values[state.city.idx] : null;
+
+  shown.forEach(function (r) {
+    box.appendChild(placeRow(r.city, {
+      cls: "fav", value: r.value, anchorValue: anchorValue,
+      anchor: !!(state.city && state.city.id === r.city.id),
+      bar: 12 + (r.value - lo) / span * 88,
+      onAnchor: function (c) { reanchor(c, showFavourites); },
+      onRemove: function (c) { toggleFav(c); showFavourites(); },
+    }));
   });
 
-  $("#favSource").textContent = "Ranked among your saved places only. ERA5 reanalysis, "
-    + state.year + ", 0.25° grid" + (spec.derived ? " · derived value" : "");
-}
-
-function renderFavPeriods() {
-  var box = $("#favPeriods");
-  box.innerHTML = "";
-  var mk = function (label, p) {
-    var b = document.createElement("button");
-    b.textContent = label;
-    b.setAttribute("aria-pressed", String(state.period === p));
-    b.addEventListener("click", function () {
-      state.period = p; store.set("period", p); showFavourites();
+  if (hidden) {
+    var p = el("p", "meta");
+    p.textContent = hidden + " favourite" + (hidden === 1 ? " is" : "s are")
+      + " hidden by the current filters. ";
+    var clr = el("button", "linkish", "Clear filters");
+    clr.type = "button";
+    clr.addEventListener("click", function () {
+      clearFilters();
+      if (ctl("#favControls")) ctl("#favControls").rebuild();
+      paintStatus();
+      showFavourites();
     });
-    box.appendChild(b);
-  };
-  mk("Year", -1);
-  MONTHS.forEach(function (m, i) { mk(m, i); });
+    p.appendChild(clr);
+    box.appendChild(p);
+  }
 
-  var sel = document.createElement("select");
-  sel.className = "pill";
-  sel.title = "Measure";
-  Object.keys(METRICS).forEach(function (k) {
-    var o = document.createElement("option");
-    o.value = k; o.textContent = METRICS[k].label; o.selected = k === state.metric;
-    sel.appendChild(o);
-  });
-  sel.addEventListener("change", function () {
-    state.metric = sel.value; store.set("metric", state.metric); showFavourites();
-  });
-  box.appendChild(sel);
+  $("#favSource").textContent = "Ranked among your saved places only, on the same "
+    + "measure and period as every other screen. ERA5 reanalysis, "
+    + state.year + " (latest complete year), 0.25° grid"
+    + (spec.derived ? " · derived value" : "");
 }
 
 /* Overall ranking: one score per place, from every parameter at once.
@@ -1258,13 +1671,18 @@ function percentiles(values, invert) {
   return out;
 }
 
+var ovSeq = 0;
 async function showOverall() {
+  var mine = ++ovSeq;
   show("overall");
   renderOvWeights();
+  if (ctl("#ovControls")) ctl("#ovControls").paint();
+  else renderControls($("#ovControls"), { measure: false, rerun: showOverall });
   if (!state.city) return;
   $("#ovProgress").hidden = false;
   $("#ovResults").innerHTML = "";
   await new Promise(function (r) { setTimeout(r, 0); });
+  await ensureYear();
 
   var anchor = state.city.idx, comps = [], names = [], i, k;
 
@@ -1272,7 +1690,7 @@ async function showOverall() {
   var climKeys = Object.keys(METRICS).filter(function (m) { return !METRICS[m].statik; });
   var dims = [];
   for (k = 0; k < climKeys.length; k++) {
-    var v = (await buildIndex(climKeys[k], state.year, -1)).values;
+    var v = (await buildIndex(climKeys[k], state.year, periodFor(climKeys[k]))).values;
     var sum = 0, sq = 0, bad = false;
     for (i = 0; i < N; i++) {
       if (!isFinite(v[i])) { bad = true; break; }
@@ -1296,17 +1714,24 @@ async function showOverall() {
     names.push(dims.length + " climate measures");
   }
 
-  if (PM25) { comps.push({ key: "air", pct: percentiles(PM25.values, true) }); names.push("air quality"); }
+  // Air follows the period like everywhere else; settling in has no months.
+  if (PM25) {
+    var air = await buildIndex("air_quality", state.year, periodFor("air_quality"));
+    comps.push({ key: "air", pct: percentiles(air.values, true) });
+    names.push("air quality");
+  }
 
   var lv = livValues(), anyLiv = false;
   for (i = 0; i < N; i++) if (isFinite(lv[i])) { anyLiv = true; break; }
   if (anyLiv) { comps.push({ key: "settling", pct: percentiles(lv, false) }); names.push("settling in"); }
+  if (mine !== ovSeq) return;
 
   var wsum = 0;
   comps.forEach(function (c) { wsum += (ovWeights[c.key] || 0); });
   if (!wsum) wsum = 1;
 
-  var score = new Float32Array(N), pass = rowFilter([]);
+  var score = new Float32Array(N), pass = rowFilter(await activeBounds());
+  if (mine !== ovSeq) return;
   for (i = 0; i < N; i++) {
     var tot = 0, ok = true;
     for (k = 0; k < comps.length; k++) {
@@ -1331,32 +1756,30 @@ async function showOverall() {
 
   $("#ovProgress").hidden = true;
   $("#ovSub").textContent = "Every place scored on " + names.join(", ")
-    + " \u00b7 relative to " + state.city.name + " \u00b7 " + state.year;
+    + " \u00b7 relative to " + state.city.name
+    + " \u00b7 " + (state.period < 0 ? "annual" : MONTHS[state.period]) + " \u00b7 " + state.year;
 
   var box = $("#ovResults");
   box.innerHTML = "";
+  if (!top.length)
+    box.innerHTML = '<p class="meta">No place matches the current filters.</p>';
   top.forEach(function (idx, rank) {
     var c = describe(idx);
-    var el = document.createElement("div");
-    el.className = "row ov" + (idx === anchor ? " anchor" : "");
-    var parts = comps.map(function (cm) {
-      return '<span class="ovpart"><i>' + cm.key.slice(0, 3) + "</i>"
-        + Math.round(cm.pct[idx]) + "</span>";
-    }).join("");
-    el.innerHTML =
-      '<div class="ovrank">' + (rank + 1) + "</div>"
-      + '<div><div class="nm">' + c.name + livBadge(c.cc) + linksFor(c) + "</div>"
-      + '<div class="wh">' + [c.region, c.country].filter(Boolean).join(", ") + "</div></div>"
-      + '<div class="ovparts">' + parts + "</div>"
-      + '<div class="val">' + score[idx].toFixed(0) + '<span class="vu">/100</span></div>'
-      + '<button class="details" type="button">Open</button>';
-    el.querySelector(".details").addEventListener("click", function () { selectCity(c); });
-    box.appendChild(el);
+    box.appendChild(placeRow(c, {
+      cls: "ov", anchor: idx === anchor, rank: rank + 1,
+      valueText: score[idx].toFixed(0), unitText: "/100", tier: false,
+      parts: comps.map(function (cm) {
+        return '<span class="ovpart"><i>' + cm.key.slice(0, 3) + "</i>"
+          + Math.round(cm.pct[idx]) + "</span>";
+      }).join(""),
+      onAnchor: function (city) { reanchor(city, showOverall); },
+    }));
   });
 
   $("#ovSource").textContent = "Each component becomes a percentile before blending, "
     + "so units never dominate. Climate similarity is measured against "
     + state.city.name + "; air quality and settling-in are absolute. "
+    + "Same period and filters as every other screen. "
     + "One place per ~1\u00b0 cell. Weights are yours to change.";
 }
 
@@ -1381,129 +1804,27 @@ function renderOvWeights() {
   });
 }
 
-function renderRefine() {
-  var body = $("#refineBody");
-  body.innerHTML = "";
-  Object.keys(METRICS).forEach(function (key) {
-    var spec = METRICS[key], r = state.ranges[key] || {};
-    var wrap = document.createElement("div");
-    wrap.className = "rf";
-    wrap.innerHTML =
-      '<span class="rf-ic" style="color:' + spec.tint + '">' + svgIcon(spec.icon) + "</span>"
-      + '<span class="rf-l">' + spec.label + "</span>"
-      + '<input class="rf-i" type="number" step="any" placeholder="min"'
-        + (r.min != null ? ' value="' + roundTo(fromBase(r.min, key), key) + '"' : "") + ">"
-      + '<input class="rf-i" type="number" step="any" placeholder="max"'
-        + (r.max != null ? ' value="' + roundTo(fromBase(r.max, key), key) + '"' : "") + ">"
-      + '<span class="rf-u">' + filterUnit(key) + "</span>";
-    var ins = wrap.querySelectorAll(".rf-i");
-    var upd = function () {
-      state.ranges[key] = {
-        min: ins[0].value === "" ? null : toBase(+ins[0].value, key),
-        max: ins[1].value === "" ? null : toBase(+ins[1].value, key),
-      };
-      store.set("ranges", state.ranges);
-  paintStatus();
-      markRefine();
-      clearTimeout(refineTimer);
-      refineTimer = setTimeout(runCompare, 350);   // settle before refetching
-    };
-    ins[0].addEventListener("change", upd);
-    ins[1].addEventListener("change", upd);
-    ins[0].addEventListener("input", upd);
-    ins[1].addEventListener("input", upd);
-    body.appendChild(wrap);
-  });
-
-  var clr = document.createElement("button");
-  clr.className = "linkish";
-  clr.textContent = "Clear all filters";
-  clr.addEventListener("click", function () {
-    state.ranges = {};
-    store.set("ranges", {});
-    renderRefine(); markRefine(); runCompare();
-  });
-  body.appendChild(clr);
-  markRefine();
-}
-
-// Values are filtered in the metric's own base unit, which the panel labels.
-function markRefine() {
-  var n = activeRanges().length;
-  var when = state.period < 0 ? "the year" : MONTHS[state.period];
-  $("#refineLabel").textContent = (n ? "Refine — " + n + " active" : "Refine by other measures")
-    + " · applied to " + when + " " + state.year;
-  $("#refine").classList.toggle("on", n > 0);
-}
-
-/* Air quality can't be ranked: ERA5 carries no aerosols, so there is no global
-   index to binary-search. What we can do honestly is fetch it for the ~21 places
-   actually on screen, which sits well inside the free rate limit. It is LIVE
-   data from a different source than the climate figures, and is labelled so. */
-var aqCache = {}, aqSeq = 0;
-
-var AQ_BANDS = [[10,"Good","aq1"],[20,"Fair","aq2"],[25,"Moderate","aq3"],
-                [50,"Poor","aq4"],[75,"Very poor","aq5"],[1e9,"Hazardous","aq6"]];
-function aqBand(v){ for (var i=0;i<AQ_BANDS.length;i++) if (v < AQ_BANDS[i][0]) return AQ_BANDS[i]; }
-
-function paintAir(entry) {
-  var hit = aqCache[entry.c.id];
-  if (!hit || !entry.el.isConnected) return;
-  var chips = entry.el.querySelector(".chips");
-  if (!chips || chips.querySelector(".aq")) return;
-  var band = aqBand(hit.pm25);
-  var sp = document.createElement("span");
-  sp.className = "chip aq " + band[2];
-  sp.innerHTML = "<em>AQ</em><b>" + hit.pm25.toFixed(0) + "</b><i>µg/m³ " + band[1] + "</i>";
-  sp.title = "PM2.5 right now, " + band[1] + " — live reading, not a climate average";
-  chips.appendChild(sp);
-}
-
-async function decorateAir(entries) {
-  var mine = ++aqSeq;
-  entries.forEach(paintAir);                       // anything already known
-  var need = entries.filter(function (e) { return !aqCache[e.c.id]; });
-  if (!need.length) return;
-  try {
-    var la = need.map(function (e) { return e.c.lat; }).join(",");
-    var lo = need.map(function (e) { return e.c.lon; }).join(",");
-    var r = await fetch("https://air-quality-api.open-meteo.com/v1/air-quality"
-      + "?latitude=" + la + "&longitude=" + lo + "&current=pm2_5");
-    if (!r.ok) return;
-    var j = await r.json();
-    if (!Array.isArray(j)) j = [j];
-    if (mine !== aqSeq) return;
-    need.forEach(function (e, i) {
-      var cur = j[i] && j[i].current;
-      if (cur && cur.pm2_5 != null) aqCache[e.c.id] = { pm25: cur.pm2_5 };
-    });
-    need.forEach(paintAir);
-  } catch (err) { /* air quality is a bonus; never break the comparison */ }
-}
+/* Air quality used to arrive twice on a row: once as the ranked PM2.5 chip
+   every measure gets, and again as a live Open-Meteo reading on a dashed pill.
+   Two numbers for one thing, on different bases, is worse than one — so the
+   live pill is gone and air quality behaves like every other measure. */
 
 var compareSeq = 0;
 async function runCompare() {
   var mine = ++compareSeq, spec = METRICS[state.metric];
-  // Liveability is genuinely annual-only; air quality now has monthly fields.
-  var period = (spec.statik && !spec.monthly) ? -1 : state.period;
-  $("#cmpTitle").textContent = spec.label + " closest to " + state.city.name;
-  $("#cmpSub").textContent = ((spec.statik && !spec.monthly) ? "annual only" :
-      period < 0 ? "annual" : MONTHS[period]) + " · " + state.year;
   $("#progress").hidden = false;
   phase("Preparing");
+  await ensureYear();
+
+  // Liveability is genuinely annual-only; air quality has monthly fields.
+  var period = periodFor(state.metric);
+  $("#cmpTitle").textContent = spec.label + " closest to " + state.city.name;
+  $("#cmpSub").textContent = (isAnnualOnly(state.metric) ? "annual only" :
+      period < 0 ? "annual" : MONTHS[period]) + " · " + state.year;
 
   try {
-    var index = await buildIndex(state.metric, state.year, state.period);
-
-    // Each constraining measure needs its own layer; they load on demand.
-    var act = activeRanges(), bounds = [];
-    for (var a = 0; a < act.length; a++) {
-      phase("Applying " + METRICS[act[a].metric].label.toLowerCase() + " filter");
-      var fspec = METRICS[act[a].metric];
-      var fperiod = (fspec.statik && !fspec.monthly) ? -1 : period;
-      var bi = await buildIndex(act[a].metric, state.year, fperiod);
-      bounds.push({ values: bi.values, min: act[a].min, max: act[a].max });
-    }
+    var index = await buildIndex(state.metric, state.year, period);
+    var bounds = await activeBounds();
     if (mine !== compareSeq) return;          // a newer request owns the screen
 
     // Monthly shape of the active metric — same layer, so this costs no network.
@@ -1523,8 +1844,7 @@ async function runCompare() {
       for (var nv = 0; nv < need.length; nv++)
         if (!varCache[need[nv] + ":" + state.year]) { have = false; break; }
       if (have) extras.push({ key: mk[e],
-        values: (await buildIndex(mk[e], state.year,
-                   (METRICS[mk[e]].statik && !METRICS[mk[e]].monthly) ? -1 : period)).values });
+        values: (await buildIndex(mk[e], state.year, periodFor(mk[e]))).values });
     }
     if (mine !== compareSeq) return;
 
@@ -1540,6 +1860,12 @@ async function runCompare() {
   } catch (err) {
     if (mine !== compareSeq) return;
     $("#progress").hidden = true;
+    // The error slot is hidden until there is an error to put in it, and the
+    // stale columns come down with it — half a comparison is a lie.
+    $("#anchorSlot").innerHTML = "";
+    $("#lowerCol").innerHTML = ""; $("#higherCol").innerHTML = "";
+    $("#lowerBand").textContent = ""; $("#higherBand").textContent = "";
+    $("#results").hidden = false;
     $("#results").innerHTML = '<p class="err">' + err.message + "</p>";
   } finally {
     // Whoever is newest owns the spinner; stale runs must not strand it.
@@ -1547,136 +1873,166 @@ async function runCompare() {
   }
 }
 
+/* One row for a place, wherever a place appears. Same anatomy and the same
+   click behaviour everywhere: the row itself re-anchors, Details opens the
+   place, the star saves it, and a chip switches measure without moving. */
+var rowsOnScreen = [];
+function placeRow(c, o) {
+  var m = o.metricKey || state.metric, spec = METRICS[m];
+  var value = o.value;
+  var wrap = el("div", "row" + (o.cls ? " " + o.cls : "") + (o.anchor ? " anchor" : ""));
+  var tier = (o.tier !== false && spec.comfort && isFinite(value)) ? dewTier(value) : null;
+  var shared = o.shared
+    ? ' <span class="wh">+' + o.shared.toLocaleString() + " more at this value</span>" : "";
+
+  // A div rather than a button, so the row's own controls can nest inside it.
+  wrap.innerHTML =
+    (o.rank ? '<div class="ovrank">' + o.rank + "</div>" : "")
+    + '<div class="who"><div class="nm">' + c.name + livBadge(c.cc)
+      + (tier ? ' <span class="tier ' + tier.cls + '">' + tier.label + "</span>" : "")
+    + '</div><div class="wh">' + [c.region, c.country].filter(Boolean).join(", ")
+      + shared + linksFor(c) + '</div><div class="chips"></div></div>'
+    + (o.monthly ? '<div class="spark-cell"></div>' : "")
+    + (o.bar != null ? '<div class="favbar"><span style="width:'
+        + o.bar.toFixed(1) + '%"></span></div>' : "")
+    + (o.parts ? '<div class="ovparts">' + o.parts + "</div>" : "")
+    + '<div class="val">' + (o.valueText != null ? o.valueText : fmt(value, m))
+      + '<span class="vu">' + (o.unitText != null ? o.unitText : unitOf(m)) + "</span></div>"
+    + ("anchorValue" in o
+        ? '<div class="dl">' + (o.anchor ? "here"
+            : o.anchorValue == null || !isFinite(value) ? "—"
+            : fmtDelta(value - o.anchorValue, m)) + "</div>" : "")
+    + '<button class="rowfav" type="button"></button>'
+    + '<button class="details" type="button" title="Every measure for this place">Details</button>'
+    + (o.onRemove ? '<button class="details drop" type="button" title="Remove">✕</button>' : "");
+
+  var star = wrap.querySelector(".rowfav");
+  star.innerHTML = svgIcon(STAR);
+  var paintStar = function () {
+    var on = isFav(c.id);
+    star.classList.toggle("on", on);
+    star.title = on ? "Saved — click to remove" : "Save this place";
+  };
+  paintStar();
+  star.addEventListener("click", function (ev) {
+    ev.stopPropagation();                // starring is not a re-anchor
+    toggleFav(c);
+    paintStar();
+    paintStatus();
+  });
+
+  // Chips for whatever else is already known about this place.
+  if (o.extras && o.extras.length) {
+    var chips = wrap.querySelector(".chips");
+    o.extras.forEach(function (x) {
+      var sp = el("button", "chip");
+      sp.type = "button";
+      sp.style.setProperty("--tint", METRICS[x.key].tint);
+      sp.innerHTML = svgIcon(METRICS[x.key].icon)
+        + "<b>" + fmt(x.values[c.idx], x.key) + "</b>"
+        + "<i>" + unitOf(x.key) + "</i>";
+      sp.title = "Compare " + METRICS[x.key].label.toLowerCase() + " from " + c.name;
+      sp.addEventListener("click", function (ev) {
+        ev.stopPropagation();              // not a re-anchor on the old measure
+        state.city = c;
+        store.set("city", c);
+        openCompare(x.key);                // same place, different measure
+      });
+      chips.appendChild(sp);
+    });
+  }
+  if (o.monthly) wrap.querySelector(".spark-cell").appendChild(rowSpark(o.monthly, c.idx, spec));
+
+  wrap.querySelector(".details").addEventListener("click", function (ev) {
+    ev.stopPropagation();                  // don't also re-anchor
+    selectCity(c);
+  });
+  var drop = wrap.querySelector(".drop");
+  if (drop) drop.addEventListener("click", function (ev) {
+    ev.stopPropagation();
+    o.onRemove(c);
+  });
+
+  if (!o.anchor && o.onAnchor) {
+    wrap.tabIndex = 0;
+    wrap.title = "Measure everything from " + c.name + " instead";
+    wrap.addEventListener("click", function (ev) {
+      if (ev.target.closest("a,button")) return;   // links and buttons act alone
+      o.onAnchor(c);
+    });
+    wrap.addEventListener("keydown", function (ev) {
+      if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); o.onAnchor(c); }
+    });
+  }
+  rowsOnScreen.push({ c: c, el: wrap });
+  return wrap;
+}
+
 function renderResults(index, anchor, nb, monthly, extras) {
   var m = state.metric, spec = METRICS[m];
   var slot = $("#anchorSlot"), lowBox = $("#lowerCol"), highBox = $("#higherCol");
   slot.innerHTML = ""; lowBox.innerHTML = ""; highBox.innerHTML = "";
-  var box = slot;                      // row() appends to whatever box points at
-  var visible = [];
+  $("#results").hidden = true;
+  rowsOnScreen = [];
 
   var row = function (entry, isAnchor) {
     var idx = isAnchor ? state.city.idx : entry.idx;
-    var c = describe(idx), value = index.values[idx];
-    // A div rather than a button, so the details control can nest inside it.
-    var el = document.createElement("div");
-    el.className = "row" + (isAnchor ? " anchor" : "");
-    var tier = spec.comfort ? dewTier(value) : null;
-    var shared = !isAnchor && entry.shared
-      ? ' <span class="wh">+' + entry.shared.toLocaleString() + " more at this value</span>" : "";
-    el.innerHTML =
-      '<div><div class="nm">' + c.name + livBadge(c.cc)
-        + (tier ? ' <span class="tier ' + tier.cls + '">' + tier.label + "</span>" : "")
-      + '</div><div class="wh">' + [c.region, c.country].filter(Boolean).join(", ")
-        + shared + linksFor(c) + '</div><div class="chips"></div></div>' 
-      + '<div class="spark-cell"></div>'
-      + '<div class="val">' + fmt(value, m) + '<span class="vu">' + unitOf(m) + "</span></div>"
-      + '<div class="dl">' + (isAnchor ? "here" : fmtDelta(value - anchor, m)) + "</div>"
-      + '<button class="rowfav" type="button" title="Save this place">'
-        + svgIcon(STAR) + "</button>"
-      + '<button class="details" title="Every measure for this place">Details</button>';
-
-    var star = el.querySelector(".rowfav");
-    var paintStar = function () {
-      var on = isFav(c.id);
-      star.classList.toggle("on", on);
-      star.title = on ? "Saved — click to remove" : "Save this place";
-    };
-    paintStar();
-    star.addEventListener("click", function (ev) {
-      ev.stopPropagation();            // starring is not a re-anchor
-      toggleFav(c);
-      paintStar();
-      paintStatus();
+    return placeRow(describe(idx), {
+      value: index.values[idx], anchorValue: anchor, anchor: isAnchor,
+      shared: isAnchor ? 0 : entry.shared, monthly: monthly, extras: extras,
+      onAnchor: function (city) { reanchor(city, runCompare); },
     });
-
-    // Chips for whatever else is already known about this place.
-    if (extras && extras.length) {
-      var chips = el.querySelector(".chips");
-      extras.forEach(function (x) {
-        var sp = document.createElement("button");
-        sp.className = "chip";
-        sp.type = "button";
-        sp.style.setProperty("--tint", METRICS[x.key].tint);
-        sp.innerHTML = svgIcon(METRICS[x.key].icon)
-          + "<b>" + fmt(x.values[idx], x.key) + "</b>"
-          + "<i>" + unitOf(x.key) + "</i>";
-        sp.title = "Compare " + METRICS[x.key].label.toLowerCase() + " from " + c.name;
-        sp.addEventListener("click", function (ev) {
-          ev.stopPropagation();              // not a re-anchor on the old metric
-          state.city = c;
-          store.set("city", c);
-          openCompare(x.key);                // same place, different measure
-        });
-        chips.appendChild(sp);
-      });
-    }
-    if (monthly) el.querySelector(".spark-cell").appendChild(rowSpark(monthly, idx, spec));
-
-    el.querySelector(".details").addEventListener("click", function (ev) {
-      ev.stopPropagation();          // don't also re-anchor
-      selectCity(c);
-    });
-    if (!isAnchor) {
-      el.tabIndex = 0;
-      el.addEventListener("click", function (ev) {
-        if (ev.target.closest("a,button")) return;   // links and buttons act alone
-        reanchor(c);
-      });
-      el.addEventListener("keydown", function (ev) {
-        if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); reanchor(c); }
-      });
-    }
-    visible.push({ c: c, el: el });
-    box.appendChild(el);
   };
 
+
   // Your place sits on top; the two directions read away from it in parallel.
-  box = slot;
-  row(null, true);
+  slot.appendChild(row(null, true));
 
   $("#lowerBand").textContent = nb.below.length
     ? "Lower \u2014 " + nb.below.length + " steps down" : "Nothing lower";
   $("#higherBand").textContent = nb.above.length
     ? "Higher \u2014 " + nb.above.length + " steps up" : "Nothing higher";
 
-  box = lowBox;
-  nb.below.forEach(function (e) { row(e, false); });
-  box = highBox;
-  nb.above.forEach(function (e) { row(e, false); });
-
-  decorateAir(visible);
+  nb.below.forEach(function (e) { lowBox.appendChild(row(e, false)); });
+  nb.above.forEach(function (e) { highBox.appendChild(row(e, false)); });
 
   $("#cmpSource").textContent =
     "Ranked against all " + N.toLocaleString() + " settlements in the GeoNames catalogue, "
     + "purely by " + spec.label.toLowerCase() + " value. ERA5 reanalysis, " + state.year
-    + ", 0.25° grid" + (spec.derived ? " · derived value" : "")
+    + " (latest complete year), 0.25° grid" + (spec.derived ? " · derived value" : "")
     + (spec.note ? " · " + spec.note : "")
-    + " · AQ chips are live PM2.5 (Open-Meteo), not a climate average"
-    + (state.country ? " · showing only " + COUNTRIES[state.country][0]
-       : state.continent ? " · showing only " + state.continent : "");
+    + (whereShown() ? " · showing only " + whereShown() : "");
 }
 
-// Clicking a neighbour re-anchors, keeping the metric and the period.
-function reanchor(city) {
+// The places currently allowed on screen, named the way the picker names them.
+function whereShown() {
+  if (state.countries.length) return state.countries.map(countryName).join(", ");
+  if (state.continents.length) return state.continents.join(", ");
+  return "";
+}
+
+/* Clicking a place makes it the anchor, on whichever screen you are on: the
+   measure, the period and the filters all stay, only the reference moves. */
+function reanchor(city, rerun) {
   state.city = city;
   store.set("city", city);
   $("#placeName").textContent = city.name;
   $("#placeMeta").textContent = [city.region, city.country].filter(Boolean).join(", ");
-  runCompare();
+  paintStatus();
+  (rerun || runCompare)();
 }
 
 /* ------------------------------------------------------------------ chrome */
 
-var yearSel = $("#year");
-YEARS.forEach(function (y) {
-  var o = document.createElement("option");
-  o.value = y; o.textContent = y; o.selected = y === state.year;
-  yearSel.appendChild(o);
-});
-yearSel.addEventListener("change", function () {
-  state.year = +yearSel.value; store.set("year", state.year);
-  if (state.city) selectCity(state.city);
-});
+/* Which screen is up, and how to redraw it. Everything that changes the whole
+   view — units, cleared filters — goes through here, so no screen is left
+   holding a stale copy of the selection. */
+function currentScreen() {
+  if (!$("#compare").hidden) return { ctl: "#cmpControls", rerun: runCompare };
+  if (!$("#favs").hidden) return { ctl: "#favControls", rerun: showFavourites };
+  if (!$("#overall").hidden) return { ctl: "#ovControls", rerun: showOverall };
+  return null;
+}
 
 var unitBtn = $("#unit");
 var paintUnit = function () { unitBtn.textContent = state.fahrenheit ? "°F" : "°C"; };
@@ -1686,8 +2042,11 @@ unitBtn.addEventListener("click", function () {
   state.fahrenheit = !state.fahrenheit;
   store.set("fahrenheit", state.fahrenheit);
   paintUnit();
-  if (!$("#compare").hidden) { renderRefine(); runCompare(); }
-  else if (!$("#profile").hidden && state.city) selectCity(state.city);
+  var scr = currentScreen();
+  if (scr) {
+    if (ctl(scr.ctl)) ctl(scr.ctl).rebuild();   // filter boxes speak the new unit
+    scr.rerun();
+  } else if (!$("#profile").hidden && state.city) selectCity(state.city);
 });
 
 function renderRecents() {
@@ -1710,10 +2069,12 @@ $("#sbFav").addEventListener("click", function () {
   if (state.city) { toggleFav(state.city); paintFavStar(state.city); paintStatus(); }
 });
 $("#sbClear").addEventListener("click", function () {
-  state.minPop = 0; state.continent = ""; state.country = ""; state.ranges = {};
-  store.set("minPop", 0); store.set("continent", ""); store.set("country", "");
-  store.set("ranges", {});
-  if (!$("#compare").hidden) { renderPeriods(); renderRefine(); runCompare(); }
+  clearFilters();
+  var scr = currentScreen();
+  if (scr) {
+    if (ctl(scr.ctl)) ctl(scr.ctl).rebuild();
+    scr.rerun();
+  }
   paintStatus();
 });
 paintFavCount();

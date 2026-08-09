@@ -115,3 +115,33 @@ identical climate value — population has no influence on the ranking itself.
 The size filter in the comparison view is a further display filter, defaulting
 to "Any size". Every settlement is always ranked either way, and the anchor's
 value never changes.
+
+## One selection, every screen
+
+`renderControls()` builds the same block for the comparison, the favourites and
+the overall ranking: period, measure, size, continents, countries, and the
+range filters. There is no second implementation to drift, so a measure added
+to `METRICS` is filterable, comparable and rankable the day it lands.
+
+- **Period is global.** A measure with no monthly field (settling in) reads its
+  annual figure, but it never overwrites the selection: pick July, switch to
+  settling in and back, and it is still July. The range filters and every other
+  measure keep reading July throughout.
+- **Continents and countries are multi-select**, from the same checklist
+  component. Countries are scoped to the chosen continents; choosing a continent
+  drops any selected country that no longer belongs.
+- **Clicking a place re-anchors, wherever you are.** The screen, the measure,
+  the period and the filters stay; only the point of reference moves. `Details`
+  opens the place page.
+- **Favourites obey the filters too**, but a favourite outside them is set aside
+  with a count and a way back, not silently dropped — you chose those places.
+
+## The year is read, not chosen
+
+There is one correct year — the newest the archive covers from January to
+December — so there is no year picker. `ensureYear()` opens the time axis of
+every ERA5 variable in use and takes the lowest "last full year" across them,
+so the set is never ragged. The answer is cached with the calendar year it was
+checked against, so the archive is asked again only when a newer year could
+plausibly exist, and never on a warm start. If the probe fails (offline with a
+warm cache), the last known year stands rather than the app breaking.
