@@ -836,3 +836,11 @@ button.chip:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
   border-top:1px solid var(--line-soft);
 }
 .foot a{color:var(--dim)}
+
+/* Period on the place page, and what Follow the weather is keeping. */
+.place-period{margin:26px 0 4px}
+.cm.target{border-color:var(--accent); box-shadow:0 0 0 1px var(--accent) inset}
+.cm.target .cm-home{color:var(--accent); font-weight:560}
+.cmc-on{font-size:11px; font-weight:560; color:var(--dim); text-transform:uppercase; letter-spacing:.04em}
+#cmpFollow{align-self:center}
+#chaseOn{margin-left:4px}

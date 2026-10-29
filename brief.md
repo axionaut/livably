@@ -64,9 +64,18 @@ weather plan in ~0.5 s. There is no cache to warm and nothing to clear.
 
 ## Follow the weather
 
-The product's main question. One place in one month is the target — by
-default the place's most comfortable month (feels-like near 22 °C, not muggy,
-not a washout) — and every month of the year gets:
+The product's main question. One place in one month is the target, and the
+month is **the selected period**, like on every other screen: pick November on
+the place page, or compare dew point in November, and that is what is followed.
+Only when the whole year is selected — no single month to keep — does it start
+from the place's most comfortable month (feels-like near 22 °C, not muggy, not
+a washout), and it selects that month visibly and says so.
+
+It matches on the **whole climate** by default, or on **one measure alone**
+("Dew point only"), which is what the comparison screen's "Follow this dew
+point in November all year" button opens. Each measure has its own step (2° of
+temperature, dew point or feels-like, 8 % humidity, ~6 km/h wind, a step in the
+square root of rain). Every month of the year gets:
 
 - **A verdict on home.** Within 1.5 steps of the target: stay. Otherwise the
   biggest gap in words ("6.6° colder, drier air").
@@ -101,7 +110,8 @@ in the header. It drives:
 ## Shareable links
 
 The hash carries `p` (GeoNames id), `v` (screen), `m` (measure), `t` (period),
-`pp` (passport), `tm` (target month) and `e` (entry filter). It is rewritten
+`pp` (passport), `on` (what Follow the weather matches on) and `e` (entry
+filter). The followed month is just `t`. It is rewritten
 with `replaceState` as the selection changes, read on load and on
 `hashchange`, and works from `file://` as well as from a web server.
 
@@ -167,6 +177,8 @@ to `METRICS` is filterable, comparable and rankable the day it lands.
 - **Continents and countries are multi-select**, from the same checklist
   component. Countries are scoped to the chosen continents; choosing a continent
   drops any selected country that no longer belongs.
+- **The place page reads and sets the period too**, and everything on it —
+  cards, sky, most similar climates, the Follow button — follows it together.
 - **Clicking a place re-anchors, wherever you are.** The screen, the measure,
   the period and the filters stay; only the point of reference moves. `Details`
   opens the place page.
