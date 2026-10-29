@@ -38,3 +38,27 @@ Regenerate the data files with `tools/build_cities.py`, `tools/build_climate.py`
 
 See `brief.md` for the architecture, the measured performance numbers, and the
 things that are easy to get wrong in this data.
+
+## Making money
+
+Livably earns through partner links at the point someone has picked where to
+be: every Follow the weather pick has a dated four-week **Stay in <month>**
+search, plus a visa link next to e-visa and on-arrival destinations, and the
+plan offers travel medical insurance and an eSIM for the months away. Rankings
+are never affected; a footer disclosure appears as soon as any partner is
+switched on.
+
+All switches live in `partners.js` and start empty. Fill in what you have, then
+commit:
+
+| Field | What to paste | Where to get it |
+| --- | --- | --- |
+| `bookingAid` | Booking.com affiliate ID | Booking.com Affiliate Partner Programme, or Travelpayouts if Booking turns down a new site |
+| `insurance` | Referral link | A nomad insurance programme, e.g. SafetyWing's |
+| `esim` | Referral link | An eSIM programme, e.g. Airalo's |
+| `visa` | Referral link | A visa-service affiliate programme |
+| `support` | Tip-jar link | Ko-fi, Buy Me a Coffee or GitHub Sponsors |
+| `goatcounter` | Site code | goatcounter.com (free, cookie-free); counts visits and every partner click |
+
+Unconfigured links stay hidden, except stays: a dated stay search is useful on
+its own and starts earning the moment `bookingAid` is set.
