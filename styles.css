@@ -817,3 +817,22 @@ button.chip:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
   .bar-right{flex-wrap:wrap}
   #passport{max-width:9.5rem}
 }
+
+/* ---------------------------------------------------------------- partners */
+.cmc-act{display:flex; gap:6px; flex-wrap:wrap; margin-top:6px}
+.plink{
+  font-size:12px; text-decoration:none; color:var(--accent);
+  padding:3px 9px; border:1px solid var(--line); border-radius:999px;
+  background:var(--panel);
+}
+.plink:hover{border-color:var(--accent)}
+.plink.go{background:var(--accent); color:var(--accent-ink); border-color:var(--accent); font-weight:560}
+.plink.go:hover{filter:brightness(1.06)}
+.chase-kit{display:flex; gap:8px; flex-wrap:wrap; margin:0 0 14px}
+.chase-kit[hidden]{display:none}
+.chase-kit .plink{font-size:13px; padding:6px 13px}
+.foot{
+  padding:18px clamp(20px,3.5vw,60px) 28px; font-size:12px; color:var(--faint);
+  border-top:1px solid var(--line-soft);
+}
+.foot a{color:var(--dim)}

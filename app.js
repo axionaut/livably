@@ -601,6 +601,77 @@ function setPassport(cc) {
   paintPassport();
 }
 
+/* -------------------------------------------------------------- partners */
+
+/* How the site pays for itself: links at the moment someone has decided where
+   they would like to be. Every one is something the visitor needs for that
+   decision anyway — a dated stay search, the visa their passport needs, cover
+   and data for months abroad — and each kind appears only when partners.js
+   holds an ID for it, except stays, which are useful unpaid. */
+var PARTNERS = window.LIVABLY_PARTNERS || {};
+var earning = function () {
+  return !!(PARTNERS.bookingAid || PARTNERS.insurance || PARTNERS.esim || PARTNERS.visa);
+};
+
+// The next time month m comes round, as a four-week stay; this month starts tomorrow.
+function stayDates(m) {
+  var now = new Date(), y = now.getFullYear();
+  var start = m === now.getMonth() ? new Date(y, m, now.getDate() + 1)
+            : new Date(m > now.getMonth() ? y : y + 1, m, 1);
+  var end = new Date(start.getTime());
+  end.setDate(end.getDate() + 28);
+  return [start, end];
+}
+var isoDate = function (d) {
+  var p = function (n) { return (n < 10 ? "0" : "") + n; };
+  return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate());
+};
+
+function stayUrl(c, m) {
+  var q = ["ss=" + encodeURIComponent([c.name, c.region, c.country].filter(Boolean).join(", ")),
+           "group_adults=1", "no_rooms=1"];
+  if (m != null) {
+    var d = stayDates(m);
+    q.push("checkin=" + isoDate(d[0]), "checkout=" + isoDate(d[1]));
+  }
+  if (PARTNERS.bookingAid) q.push("aid=" + encodeURIComponent(PARTNERS.bookingAid));
+  return "https://www.booking.com/searchresults.html?" + q.join("&");
+}
+
+// Paid links say so to search engines; the visible disclosure is in the footer.
+function partnerLink(kind, href, text, cls, title) {
+  var paid = kind !== "stay" || PARTNERS.bookingAid;
+  return '<a class="plink' + (cls ? " " + cls : "") + '" data-partner="' + kind + '"'
+    + ' target="_blank" rel="' + (paid ? "sponsored " : "") + 'noopener noreferrer"'
+    + (title ? ' title="' + title + '"' : "") + ' href="' + href + '">' + text + "</a>";
+}
+
+/* Cookie-free counting, only when a GoatCounter code is set: visits, plus one
+   event per partner click, so it is clear which links earn their place. */
+if (PARTNERS.goatcounter && /^[a-z0-9-]+$/.test(PARTNERS.goatcounter)) {
+  var gc = document.createElement("script");
+  gc.async = true;
+  gc.src = "https://gc.zgo.at/count.js";
+  gc.setAttribute("data-goatcounter", "https://" + PARTNERS.goatcounter + ".goatcounter.com/count");
+  document.head.appendChild(gc);
+}
+document.addEventListener("click", function (e) {
+  var a = e.target.closest && e.target.closest("a[data-partner]");
+  if (a && window.goatcounter && window.goatcounter.count)
+    window.goatcounter.count({ path: "out/" + a.dataset.partner, title: a.textContent, event: true });
+});
+
+function paintFooter() {
+  var f = $("#foot");
+  if (!f) return;
+  f.innerHTML = (earning()
+      ? "Some links — stays, insurance, eSIMs, visas — may earn Livably a small "
+        + "commission, at no cost to you. It never changes a ranking. " : "")
+    + (PARTNERS.support ? '<a data-partner="support" target="_blank" rel="noopener noreferrer" href="'
+        + PARTNERS.support + '">Support Livably</a> · ' : "")
+    + "Climate: ERA5 (Copernicus) · Air: SatPM2.5 · Places: GeoNames · Entry rules: passport-index-data";
+}
+
 // Small outward links, on every row as well as the place page.
 function linksFor(c) {
   var q = encodeURIComponent([c.name, c.region, c.country].filter(Boolean).join(" "));
@@ -679,7 +750,7 @@ function show(name) {
   ["start", "profile", "compare", "favs", "overall", "chase"].forEach(function (s) { $("#" + s).hidden = s !== name; });
   // Coming back to the place page after changing the month elsewhere: the
   // cards are redrawn for the period that is now selected.
-  if (name === "profile" && lastProfile) renderProfile(lastProfile);
+  if (name === "profile" && lastProfile) { renderProfile(lastProfile); renderPlaceExtras(state.city); }
   window.scrollTo(0, 0);
   paintStatus();
 }
@@ -885,7 +956,9 @@ function renderPlaceExtras(city) {
       + '">Google</a>'
     + '<a class="cchip lnk" target="_blank" rel="noopener noreferrer" href="'
       + "https://www.google.com/maps/search/?api=1&query="
-      + encodeURIComponent(city.lat + "," + city.lon) + '">Map</a>';
+      + encodeURIComponent(city.lat + "," + city.lon) + '">Map</a>'
+    + partnerLink("stay", stayUrl(city, state.period >= 0 ? state.period : null),
+                  "Stays" + (state.period >= 0 ? " in " + MONTHS[state.period] : ""), "cchip lnk");
   box.appendChild(links);
 
   // Ten years, not one: a single year is weather, and a freak summer would
@@ -2118,6 +2191,14 @@ function showChase() {
     : state.city.name + " never quite matches its own " + MONTH_NAMES[tm]
       + " in another month — every month below is a move.";
 
+  // Months away from home is exactly when cover and data abroad matter.
+  var away = 12 - stays.length, kit = [];
+  if (PARTNERS.insurance) kit.push(partnerLink("insurance", PARTNERS.insurance,
+    "Travel medical insurance for the " + away + " months away →"));
+  if (PARTNERS.esim) kit.push(partnerLink("esim", PARTNERS.esim, "Mobile data abroad with an eSIM →"));
+  $("#chaseKit").innerHTML = kit.join("");
+  $("#chaseKit").hidden = !kit.length || !away;
+
   $("#chaseSource").textContent = "Matched on temperature, dew point, rainfall and wind, "
     + "month by month, across all " + N.toLocaleString() + " places. One step is 2° of "
     + "temperature or dew point, ~6 km/h of wind, or a modest change in rain; "
@@ -2138,7 +2219,14 @@ function chaseCard(c, pk, m) {
       + (isFinite(air) ? " <i>PM2.5 " + air.toFixed(0) + "</i>" : "") + "</div>"
     + '<div class="cmc-foot"><span class="cmc-match">' + matchWord(pk.d) + "</span>"
       + (code ? '<span class="cmc-visa v' + code + '">' + VISA_WORDS[code] + "</span>" : "")
-      + linksFor(c) + "</div>";
+      + linksFor(c) + "</div>"
+    + '<div class="cmc-act">'
+      + partnerLink("stay", stayUrl(c, m), "Stay in " + MONTHS[m] + " →", "go",
+                    "Four weeks in " + c.name + " from " + isoDate(stayDates(m)[0]))
+      + ((code === "E" || code === "A") && PARTNERS.visa
+          ? partnerLink("visa", PARTNERS.visa, code === "E" ? "Get the e-visa" : "Visa on arrival help")
+          : "")
+      + "</div>";
   card.tabIndex = 0;
   card.title = "Open " + c.name;
   var open = function (ev) {
@@ -2301,6 +2389,7 @@ $("#sbClear").addEventListener("click", function () {
   paintStatus();
 });
 paintFavCount();
+paintFooter();
 renderRecents();
 $("#q").disabled = false;
 note(N.toLocaleString() + " places · ten years of climate · entry rules for "
