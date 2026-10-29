@@ -347,8 +347,8 @@ var state = {
   ranges: store.get("ranges", {}),
   favs: store.get("favs", []),
   entry: store.get("entry", "any"),
-  // The month whose weather Follow-the-weather keeps; null picks the best one.
-  chaseMonth: null,
+  // Follow the weather matches on the whole climate, or on one measure alone.
+  chaseOn: store.get("chaseOn", "climate"),
 };
 // How easily the passport gets you in, as a filter shared by every screen.
 var ENTRY = {
@@ -472,8 +472,15 @@ function climateTheme(t, rain, rh) {
 function applyScene(prof) {
   if (!prof) return;
   var root = document.documentElement.style;
-  var pick = function (k) { return prof[k] && isFinite(prof[k].annual) ? prof[k].annual : null; };
-  var rh = pick("humidity"), rain = pick("precipitation"), t = pick("temperature");
+  // The sky shows the period that is selected; a month's rain is scaled to a
+  // yearly rate so the same thresholds read both.
+  var p = state.period;
+  var pick = function (k) {
+    var v = prof[k] && (p < 0 ? prof[k].annual : prof[k].months[p]);
+    return v != null && isFinite(v) ? v : null;
+  };
+  var rh = pick("humidity"), t = pick("temperature"), rain = pick("precipitation");
+  if (rain != null && p >= 0) rain *= 12;
   var clamp = function (x, lo, hi) { return x < lo ? lo : x > hi ? hi : x; };
 
   var cloud = rh == null ? 0.45 : clamp((rh - 38) / 46, 0.1, 1);        // 38%->clear, 84%->overcast
@@ -750,7 +757,7 @@ function show(name) {
   ["start", "profile", "compare", "favs", "overall", "chase"].forEach(function (s) { $("#" + s).hidden = s !== name; });
   // Coming back to the place page after changing the month elsewhere: the
   // cards are redrawn for the period that is now selected.
-  if (name === "profile" && lastProfile) { renderProfile(lastProfile); renderPlaceExtras(state.city); }
+  if (name === "profile" && lastProfile) paintPlace();
   window.scrollTo(0, 0);
   paintStatus();
 }
@@ -818,7 +825,6 @@ $("#locate").addEventListener("click", function () {
 async function selectCity(city) {
   state.city = city;
   store.set("city", city);
-  state.chaseMonth = null;             // a new place has its own best month
   profileFor = city.id;
   lastProfile = null;                  // the old place's cards are not this one's
   paintStatus();
@@ -844,12 +850,8 @@ async function selectCity(city) {
       for (var m = 0; m < 12; m++) months.push(valuesFor(keys[i], m)[city.idx]);
       prof[keys[i]] = { annual: valuesFor(keys[i], -1)[city.idx], months: months };
     }
-    applyMood(prof.temperature.annual, prof.dew_point.annual);
-    applyScene(prof);
     lastProfile = prof;
-    renderSimilar(city);
-    renderChaseCta(city);
-    renderProfile(prof);
+    paintPlace();
   } catch (err) {
     $("#metricGrid").innerHTML = '<p class="err">' + err.message + "</p>";
   }
@@ -877,8 +879,9 @@ function coords(la, lo) {
 function similarPlaces(idx, n) {
   var keys = Object.keys(METRICS).filter(function (k) { return !METRICS[k].statik; });
 
+  // In the selected period: November is matched against November.
   var dims = keys.map(function (k) {
-    var v = valuesFor(k, -1);
+    var v = valuesFor(k, state.period);
     var sum = 0, sq = 0;
     for (var i = 0; i < N; i++) {
       if (!isFinite(v[i])) return null;        // gappy measure sits this out
@@ -980,7 +983,9 @@ function renderSimilar(city) {
 
   var head = document.createElement("span");
   head.className = "pe-head";
-  head.textContent = "Most similar climates · across " + res.used
+  head.textContent = "Most similar climates"
+    + (state.period >= 0 ? " in " + MONTH_NAMES[state.period] : " over the year")
+    + " · across " + res.used
     + " measure" + (res.used === 1 ? "" : "s");
   box.appendChild(head);
 
@@ -997,6 +1002,45 @@ function renderSimilar(city) {
     wrap.appendChild(b);
   });
   box.appendChild(wrap);
+}
+
+/* Everything on the place page that depends on the selected period, redrawn
+   together so the cards, the sky, the similar places and the Follow button
+   never disagree about which month is meant. */
+function paintPlace() {
+  var prof = lastProfile, city = state.city, p = state.period;
+  if (!prof || !city) return;
+  var at = function (k) { return p < 0 ? prof[k].annual : prof[k].months[p]; };
+  applyMood(at("temperature"), at("dew_point"));
+  applyScene(prof);
+  renderPlacePeriod();
+  renderPlaceExtras(city);
+  renderSimilar(city);
+  renderChaseCta(city);
+  renderProfile(prof);
+}
+
+// The place page picks the period too; it is the same period every screen reads.
+function renderPlacePeriod() {
+  var box = $("#placePeriod");
+  if (!box) return;
+  box.innerHTML = "";
+  box.appendChild(el("span", "ctl-k", "Period"));
+  var row = el("div", "periods");
+  [-1].concat(MONTHS.map(function (_, i) { return i; })).forEach(function (p) {
+    var b = el("button", null, p < 0 ? "Year" : MONTHS[p]);
+    b.type = "button";
+    b.setAttribute("aria-pressed", String(state.period === p));
+    b.addEventListener("click", function () {
+      if (state.period === p) return;
+      state.period = p;
+      store.set("period", p);
+      paintPlace();
+      paintStatus();
+    });
+    row.appendChild(b);
+  });
+  box.appendChild(row);
 }
 
 function renderProfile(prof) {
@@ -1796,6 +1840,11 @@ async function runCompare() {
   $("#cmpTitle").textContent = spec.label + " closest to " + state.city.name;
   $("#cmpSub").textContent = (isAnnualOnly(state.metric) ? "annual only" :
       period < 0 ? "annual" : MONTHS[period]) + " · " + NORMALS;
+  // Liking one figure in one month is exactly what Follow the weather keeps.
+  var fb = $("#cmpFollow");
+  fb.hidden = !MATCH[state.metric];
+  fb.textContent = "Follow this " + spec.label.toLowerCase()
+    + (period >= 0 ? " in " + MONTH_NAMES[period] : "") + " all year →";
 
   try {
     var index = await buildIndex(state.metric, period);
@@ -2057,6 +2106,40 @@ function monthRuns(list) {
   return out.join(", ");
 }
 
+/* What a month is matched on. The whole climate by default; or one measure
+   alone, when that measure is the thing the visitor cares about — "I like
+   November's dew point" should follow the dew point, not everything else.
+   Each measure has its own step, the size of a difference that matters. */
+var MATCH = {
+  temperature: { step: 2 }, dew_point: { step: 2 }, feels_like: { step: 2 },
+  humidity: { step: 8 }, precipitation: { step: 1.5, sqrt: true }, wind: { step: 6 },
+};
+var matchOn = function () { return MATCH[state.chaseOn] ? state.chaseOn : "climate"; };
+
+function measureAt(key, cell, m) {
+  var v = cellValues(key, m)[cell];
+  return MATCH[key].sqrt ? Math.sqrt(Math.max(0, v)) : v;
+}
+function targetAt(on, cell, m) {
+  return on === "climate" ? climateAt(cell, m) : measureAt(on, cell, m);
+}
+function distTo(on, cell, m, target) {
+  return on === "climate" ? chaseDist(climateAt(cell, m), target)
+                          : Math.abs(measureAt(on, cell, m) - target) / MATCH[on].step;
+}
+
+/* The month Follow the weather keeps is the month that is selected, like
+   every other screen. Only when the selection is the whole year — which has no
+   single month to keep — does it start from the place's most comfortable
+   month, and it selects that month visibly rather than silently. */
+function chaseTargetMonth() {
+  if (state.period >= 0) return { m: state.period, picked: false };
+  var m = bestMonths(state.city.idx).best;
+  state.period = m;
+  store.set("period", m);
+  return { m: m, picked: true };
+}
+
 /* For one month: cells nearest the target, each represented by its largest
    place that passes the filters. The anchor's own surroundings are left out —
    home gets its own verdict — and results are spread out: one per ~1 degree
@@ -2069,9 +2152,9 @@ function monthRuns(list) {
 var sizeCost = function (pop) {
   return Math.max(0, 6 - Math.log(Math.max(pop, 1)) / Math.LN10) / 3;
 };
-function chaseMatches(target, m, pass, n, home) {
+function chaseMatches(on, target, m, pass, n, home) {
   var C = CLIM.cells, d = new Float32Array(C), order = new Array(C), c;
-  for (c = 0; c < C; c++) { d[c] = chaseDist(climateAt(c, m), target); order[c] = c; }
+  for (c = 0; c < C; c++) { d[c] = distTo(on, c, m, target); order[c] = c; }
   order.sort(function (a, b) { return d[a] - d[b]; });
 
   var cosl = Math.cos(LAT[home] * Math.PI / 180), seen = {}, perCountry = {}, out = [];
@@ -2093,7 +2176,7 @@ function chaseMatches(target, m, pass, n, home) {
     seen[cell] = 1;
     perCountry[cc] = (perCountry[cc] || 0) + 1;
     if (!out.length) limit = Math.max(d[c] + 1, CHASE_STAY);
-    out.push({ idx: best, d: d[c], k: climateAt(c, m) });
+    out.push({ idx: best, d: d[c], cell: c });
   }
   // Country spread is re-applied after reordering, on the final picks.
   out.sort(function (a, b) {
@@ -2110,7 +2193,16 @@ function chaseMatches(target, m, pass, n, home) {
 }
 
 // What home is like in a month it falls short: the biggest gap, in words.
-function homeGap(k, target) {
+function homeGap(on, cell, m, target, tm) {
+  if (on !== "climate") {
+    var now = cellValues(on, m)[cell], want = cellValues(on, tm)[cell], dv = now - want;
+    var spec = METRICS[on];
+    if (on === "precipitation")
+      return Math.round(Math.abs(dv)) + " mm " + (dv > 0 ? "wetter" : "drier");
+    return spec.label.toLowerCase() + " " + fmtDelta(Math.abs(dv), on).replace(/^\+/, "")
+      + (spec.unit === "°C" ? "°" : " " + unitOf(on)) + (dv > 0 ? " higher" : " lower");
+  }
+  var k = climateAt(cell, m);
   var dt = k.t - target.t, dd = k.td - target.td, dr = k.rain - target.rain;
   var gaps = [
     [Math.abs(dt) / CHASE_STEP.t, fmtDelta(Math.abs(dt), "temperature").replace(/^\+/, "")
@@ -2125,21 +2217,26 @@ var chaseSeq = 0;
 function showChase() {
   var mine = ++chaseSeq;
   if (!state.city) return show("start");
+  var tgt = chaseTargetMonth(), tm = tgt.m, on = matchOn();
   show("chase");
   if (ctl("#chaseControls")) ctl("#chaseControls").paint();
   else renderControls($("#chaseControls"), { measure: false, period: false, rerun: showChase });
 
   var home = state.city.idx, homeCell = CLIM.cellOf[home], bm = bestMonths(home);
-  var tm = state.chaseMonth == null ? bm.best : state.chaseMonth;
-  var target = climateAt(homeCell, tm);
-  var u = state.fahrenheit ? "°F" : "°C";
+  var target = targetAt(on, homeCell, tm);
+  var u = state.fahrenheit ? "°F" : "°C", k0 = climateAt(homeCell, tm);
 
-  $("#chaseTitle").textContent = "Keep " + state.city.name + "’s " + MONTH_NAMES[tm] + " all year";
-  $("#chaseSub").textContent = "Target: " + fmt(target.t, "temperature") + u + ", dew point "
-    + fmt(target.td, "dew_point") + u + ", " + Math.round(target.mm) + " mm of rain, wind "
-    + fmt(target.ws * 3.6, "wind") + " km/h · " + NORMALS + " normals";
+  $("#chaseTitle").textContent = "Keep " + state.city.name + "’s " + MONTH_NAMES[tm]
+    + (on === "climate" ? "" : " " + METRICS[on].label.toLowerCase()) + " all year";
+  $("#chaseSub").textContent = (on === "climate"
+      ? "Target: " + fmt(k0.t, "temperature") + u + ", dew point " + fmt(k0.td, "dew_point") + u
+        + ", " + Math.round(k0.mm) + " mm of rain, wind " + fmt(k0.ws * 3.6, "wind") + " km/h"
+      : "Target: " + METRICS[on].label.toLowerCase() + " "
+        + fmt(cellValues(on, tm)[homeCell], on) + " " + unitOf(on)
+        + " — matched on this alone; other measures may differ")
+    + " · " + NORMALS + " normals";
 
-  // Target month picker; the place's pleasant months are marked.
+  // Target month picker: it is the app's period, so it moves every screen.
   var pick = $("#chaseMonths");
   pick.innerHTML = "";
   var good = setOf(bm.good);
@@ -2149,11 +2246,30 @@ function showChase() {
     b.setAttribute("aria-pressed", String(m === tm));
     b.title = (good[m] ? "Pleasant in " : "") + state.city.name + " in " + MONTH_NAMES[m];
     b.addEventListener("click", function () {
-      state.chaseMonth = m;
+      state.period = m;
+      store.set("period", m);
       showChase();
     });
     pick.appendChild(b);
   });
+
+  // Match on the whole climate, or on one measure alone.
+  var onSel = $("#chaseOn");
+  onSel.innerHTML = "";
+  [["climate", "Whole climate"]].concat(Object.keys(MATCH).map(function (k) {
+    return [k, METRICS[k].label + " only"];
+  })).forEach(function (p) {
+    var op = el("option", null, p[1]);
+    op.value = p[0];
+    op.selected = p[0] === on;
+    onSel.appendChild(op);
+  });
+  onSel.classList.toggle("on", on !== "climate");
+  onSel.onchange = function () {
+    state.chaseOn = onSel.value;
+    store.set("chaseOn", state.chaseOn);
+    showChase();
+  };
 
   var box = $("#chaseResults");
   box.innerHTML = "";
@@ -2163,33 +2279,35 @@ function showChase() {
     var m = (now + i) % 12;
     // Range filters read each month's own figures: a July row, July air.
     var mpass = rowFilter(activeBounds(m));
-    var homeK = climateAt(homeCell, m), hd = chaseDist(homeK, target);
+    var hd = distTo(on, homeCell, m, target);
     var stay = hd <= CHASE_STAY;
     if (stay) stays.push(m);
-    var picks = chaseMatches(target, m, mpass, stay ? 3 : 4, home);
+    var picks = chaseMatches(on, target, m, mpass, stay ? 3 : 4, home);
     if (mine !== chaseSeq) return;
 
-    var blk = el("section", "cm" + (stay ? " stay" : ""));
+    var blk = el("section", "cm" + (stay ? " stay" : "") + (m === tm ? " target" : ""));
     var head = el("div", "cm-head");
     head.appendChild(el("b", "cm-month", MONTH_NAMES[m] + (i === 0 ? " · now" : "")));
-    head.appendChild(el("span", "cm-home", stay
-      ? "Stay in " + state.city.name + " — " + matchWord(hd).toLowerCase()
-      : state.city.name + " is " + homeGap(homeK, target) + " — go"));
+    head.appendChild(el("span", "cm-home", m === tm
+      ? "The month you are keeping — stay in " + state.city.name
+      : stay ? "Stay in " + state.city.name + " — " + matchWord(hd).toLowerCase()
+      : state.city.name + ": " + homeGap(on, homeCell, m, target, tm) + " — go"));
     blk.appendChild(head);
 
     var list = el("div", "cm-picks");
     if (!picks.length) list.appendChild(el("p", "meta", "Nothing matches the current filters this month."));
-    picks.forEach(function (pk) { list.appendChild(chaseCard(describe(pk.idx), pk, m)); });
+    picks.forEach(function (pk) { list.appendChild(chaseCard(describe(pk.idx), pk, m, on)); });
     blk.appendChild(list);
     box.appendChild(blk);
   }
 
-  $("#chasePlan").textContent = stays.length
-    ? "Stay home " + stays.length + " month" + (stays.length === 1 ? "" : "s")
-      + " (" + monthRuns(stays) + "). For the other " + (12 - stays.length)
-      + ", these are the closest matches on Earth."
-    : state.city.name + " never quite matches its own " + MONTH_NAMES[tm]
-      + " in another month — every month below is a move.";
+  var lead = tgt.picked ? "No month was selected, so this starts from " + state.city.name
+    + "’s most comfortable one, " + MONTH_NAMES[tm] + " — pick any other above. " : "";
+  $("#chasePlan").textContent = lead + (stays.length > 1
+    ? "Stay home " + stays.length + " months (" + monthRuns(stays) + "). For the other "
+      + (12 - stays.length) + ", these are the closest matches on Earth."
+    : state.city.name + " only matches its own " + MONTH_NAMES[tm]
+      + " in " + MONTH_NAMES[tm] + " — every other month below is a move.");
 
   // Months away from home is exactly when cover and data abroad matter.
   var away = 12 - stays.length, kit = [];
@@ -2199,24 +2317,35 @@ function showChase() {
   $("#chaseKit").innerHTML = kit.join("");
   $("#chaseKit").hidden = !kit.length || !away;
 
-  $("#chaseSource").textContent = "Matched on temperature, dew point, rainfall and wind, "
-    + "month by month, across all " + N.toLocaleString() + " places. One step is 2° of "
-    + "temperature or dew point, ~6 km/h of wind, or a modest change in rain; "
-    + "“stay” means home is within " + CHASE_STAY + " steps. Entry rules for a "
-    + countryName(state.passport) + " passport. ERA5 " + NORMALS + " normals, 0.25° grid.";
+  $("#chaseSource").textContent = (on === "climate"
+      ? "Matched on temperature, dew point, rainfall and wind together. One step is 2° of "
+        + "temperature or dew point, ~6 km/h of wind, or a modest change in rain"
+      : "Matched on " + METRICS[on].label.toLowerCase() + " alone. One step is "
+        + (on === "precipitation" ? "a modest change in rain"
+           : MATCH[on].step + (METRICS[on].unit === "°C" ? "°" : " " + METRICS[on].unit)))
+    + "; “stay” means home is within " + CHASE_STAY + " steps. Month by month across all "
+    + N.toLocaleString() + " places. Entry rules for a " + countryName(state.passport)
+    + " passport. ERA5 " + NORMALS + " normals, 0.25° grid.";
   syncHash();
 }
 
-function chaseCard(c, pk, m) {
+function chaseCard(c, pk, m, on) {
   var card = el("div", "cmc");
-  var air = PM25 ? PM25.month[m][c.idx] : Infinity, code = visaCode(c.cc);
+  var air = PM25 ? PM25.month[m][c.idx] : Infinity, code = visaCode(c.cc), k = climateAt(pk.cell, m);
+  // The measure being matched leads; the rest are context.
+  var lead = on === "climate" ? fmt(k.t, "temperature") + "°"
+    : fmt(cellValues(on, m)[pk.cell], on) + (METRICS[on].unit === "°C" ? "°" : " " + unitOf(on));
+  var rest = [];
+  if (on !== "temperature" && on !== "climate") rest.push("temp " + fmt(k.t, "temperature") + "°");
+  if (on !== "dew_point") rest.push("dew " + fmt(k.td, "dew_point") + "°");
+  if (on !== "precipitation") rest.push(Math.round(k.mm) + " mm");
+  if (isFinite(air)) rest.push("PM2.5 " + air.toFixed(0));
   card.innerHTML =
     '<div class="cmc-top"><b>' + c.name + "</b>" + livBadge(c.cc) + "</div>"
     + '<div class="wh">' + [c.region, c.country].filter(Boolean).join(", ") + "</div>"
-    + '<div class="cmc-k">' + fmt(pk.k.t, "temperature") + "°"
-      + ' <i>dew ' + fmt(pk.k.td, "dew_point") + "°</i>"
-      + " <i>" + Math.round(pk.k.mm) + " mm</i>"
-      + (isFinite(air) ? " <i>PM2.5 " + air.toFixed(0) + "</i>" : "") + "</div>"
+    + '<div class="cmc-k">' + (on === "climate" ? "" : '<span class="cmc-on">'
+        + METRICS[on].label + "</span> ") + lead
+      + rest.map(function (r) { return " <i>" + r + "</i>"; }).join("") + "</div>"
     + '<div class="cmc-foot"><span class="cmc-match">' + matchWord(pk.d) + "</span>"
       + (code ? '<span class="cmc-visa v' + code + '">' + VISA_WORDS[code] + "</span>" : "")
       + linksFor(c) + "</div>"
@@ -2238,25 +2367,37 @@ function chaseCard(c, pk, m) {
   return card;
 }
 
-/* On the place page: when this place is at its best, and the way in to
-   following that weather around the year. */
+// Every way into Follow the weather goes through here, saying what to match on.
+function followWeather(on) {
+  state.chaseOn = on;
+  store.set("chaseOn", on);
+  showChase();
+}
+
+/* On the place page: the month you have selected, or — with the whole year
+   selected — when this place is at its best, and the way in to following
+   that weather around the year. */
 function renderChaseCta(city) {
   var box = $("#placeChase");
   if (!box) return;
-  var bm = bestMonths(city.idx), k = climateAt(CLIM.cellOf[city.idx], bm.best);
+  var bm = bestMonths(city.idx), chosen = state.period >= 0;
+  var m = chosen ? state.period : bm.best, k = climateAt(CLIM.cellOf[city.idx], m);
   var u = state.fahrenheit ? "°F" : "°C";
   box.innerHTML = "";
   var txt = el("div", "pc-txt");
-  txt.innerHTML = bm.good.length
-    ? "<b>" + city.name + " is at its best " + monthRuns(bm.good) + ".</b> "
-      + "In " + MONTH_NAMES[bm.best] + " it averages " + fmt(k.t, "temperature") + u
-      + " with a " + fmt(k.td, "dew_point") + u + " dew point."
-    : "<b>No month in " + city.name + " is mild by the usual measures.</b> Its most "
-      + "comfortable is " + MONTH_NAMES[bm.best] + ", at " + fmt(k.t, "temperature") + u + ".";
+  var at = "In " + MONTH_NAMES[m] + " it averages " + fmt(k.t, "temperature") + u
+    + " with a " + fmt(k.td, "dew_point") + u + " dew point and " + Math.round(k.mm) + " mm of rain.";
+  txt.innerHTML = (bm.good.length
+      ? "<b>" + city.name + " is at its best " + monthRuns(bm.good) + ".</b> "
+      : "<b>No month in " + city.name + " is mild by the usual measures.</b> ") + at;
   box.appendChild(txt);
-  var go = el("button", "primary", "Follow " + MONTH_NAMES[bm.best] + " in " + city.name + " all year →");
+  var go = el("button", "primary", "Follow " + MONTH_NAMES[m] + " in " + city.name + " all year →");
   go.type = "button";
-  go.addEventListener("click", function () { state.chaseMonth = bm.best; showChase(); });
+  go.addEventListener("click", function () {
+    state.period = m;
+    store.set("period", m);
+    followWeather("climate");
+  });
   box.appendChild(go);
 }
 
@@ -2338,7 +2479,7 @@ function syncHash() {
   SCREENS.forEach(function (n) { if (!$("#" + n).hidden) scr = n; });
   var q = ["p=" + state.city.id, "v=" + scr, "m=" + state.metric, "t=" + state.period,
            "pp=" + state.passport];
-  if (scr === "chase" && state.chaseMonth != null) q.push("tm=" + state.chaseMonth);
+  if (scr === "chase" && state.chaseOn !== "climate") q.push("on=" + state.chaseOn);
   if (state.entry !== "any") q.push("e=" + state.entry);
   var h = "#" + q.join("&");
   if (location.hash === h) return;
@@ -2359,7 +2500,9 @@ function readHash() {
   if (q.t != null && +q.t >= -1 && +q.t <= 11) state.period = +q.t;
   if (LIV.passports[q.pp]) state.passport = q.pp;
   if (ENTRY[q.e]) state.entry = q.e;
-  return { city: describe(at), screen: q.v, tm: q.tm != null ? +q.tm : null };
+  if (q.on) state.chaseOn = MATCH[q.on] ? q.on : "climate";
+  else if (q.v === "chase") state.chaseOn = "climate";
+  return { city: describe(at), screen: q.v };
 }
 
 $("#copyLink").addEventListener("click", function () {
@@ -2375,6 +2518,7 @@ $("#copyLink").addEventListener("click", function () {
 
 $("#ovBtn").addEventListener("click", showOverall);
 $("#chaseBtn").addEventListener("click", function () { showChase(); });
+$("#cmpFollow").addEventListener("click", function () { followWeather(state.metric); });
 $("#favBtn").addEventListener("click", showFavourites);
 $("#sbFav").addEventListener("click", function () {
   if (state.city) { toggleFav(state.city); paintFavStar(state.city); paintStatus(); }
@@ -2405,7 +2549,7 @@ function openLink() {
   passportSel.value = state.passport;
   LIV_VALUES = null;
   selectCity(link.city);
-  if (link.screen === "chase") { state.chaseMonth = link.tm; showChase(); }
+  if (link.screen === "chase") showChase();
   else if (link.screen === "compare") openCompare(state.metric);
   else if (link.screen === "overall") showOverall();
   else if (link.screen === "favs") showFavourites();

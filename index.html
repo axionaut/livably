@@ -115,6 +115,7 @@
     <div id="placeSimilar" class="place-similar"></div>
   </div>
   <div id="placeChase" class="place-chase"></div>
+  <div class="ctl-row place-period" id="placePeriod"></div>
   <p class="hint">Click any figure to find the places closest to it.</p>
   <div id="metricGrid" class="grid"></div>
   <p class="source" id="profileSource"></p>
@@ -144,8 +145,9 @@
     </div>
   </div>
   <div class="ctl-row">
-    <span class="ctl-k">Target</span>
+    <span class="ctl-k">Keep</span>
     <div class="periods" id="chaseMonths"></div>
+    <select id="chaseOn" class="pill" title="Match the whole climate, or one measure alone"></select>
   </div>
   <div class="controls" id="chaseControls"></div>
   <p id="chasePlan" class="chase-plan"></p>
@@ -175,6 +177,7 @@
       <h2 id="cmpTitle"></h2>
       <p id="cmpSub" class="meta"></p>
     </div>
+    <button id="cmpFollow" class="primary" type="button" hidden></button>
   </div>
   <div class="controls" id="cmpControls"></div>
 
