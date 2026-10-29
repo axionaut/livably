@@ -13,43 +13,37 @@ var $ = function (s) { return document.querySelector(s); };
 
 /* ------------------------------------------------------------- registry */
 
-var ERA5 = "https://planette-era5.s3.us-east-2.amazonaws.com/era5";
-var era5Url = function (v) {
-  return ERA5 + "/" + v + "/month/0p25latx0p25lon/era5_" + v + "_month_0p25latx0p25lon.zarr";
-};
-var K = 273.15;
 // Magnus / Alduchov-Eskridge saturation vapour pressure, hPa.
 var svp = function (t) { return 6.1094 * Math.exp((17.625 * t) / (t + 243.04)); };
 
+/* Climate is baked offline by tools/build_climate.py: ten-year monthly normals
+   of the four ERA5 fields every measure is built from. Temperatures arrive in
+   degC, wind in m/s and rainfall in mm/day. */
 var METRICS = {
   temperature: { icon: '<path d="M14 4v10.5a4 4 0 1 1-4 0V4a2 2 0 0 1 4 0Z"/>', tint: "#f0a35e", label: "Temperature", unit: "°C", vars: ["t2m"], annual: "mean", dp: 1,
-    compute: function (v) { return v.t2m - K; } },
+    compute: function (v) { return v.t2m; } },
 
   dew_point: { icon: '<path d="M12 22a7 7 0 0 0 7-7c0-2-1-3.9-3-5.5S12.5 5.5 12 3c-.5 2.5-2 4.9-4 6.5S5 13 5 15a7 7 0 0 0 7 7Z"/>', tint: "#5eb3f6", label: "Dew point", unit: "°C", vars: ["td2m"], annual: "mean", dp: 1,
-    comfort: true, compute: function (v) { return v.td2m - K; } },
+    comfort: true, compute: function (v) { return v.td2m; } },
 
-  feels_like: { icon: '<circle cx="12" cy="12" r="3.5"/><path d="M12 2v2m0 16v2M4.2 4.2l1.4 1.4m12.8 12.8 1.4 1.4M2 12h2m16 0h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4"/>', tint: "#f2778a", label: "Feels like", unit: "°C", vars: ["t2m", "td2m", "u10m", "v10m"],
+  feels_like: { icon: '<circle cx="12" cy="12" r="3.5"/><path d="M12 2v2m0 16v2M4.2 4.2l1.4 1.4m12.8 12.8 1.4 1.4M2 12h2m16 0h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4"/>', tint: "#f2778a", label: "Feels like", unit: "°C", vars: ["t2m", "td2m", "ws"],
     annual: "mean", dp: 1, derived: true,
     // Australian BoM apparent temperature.
-    compute: function (v) {
-      return (v.t2m - K) + 0.33 * svp(v.td2m - K)
-             - 0.7 * Math.sqrt(v.u10m * v.u10m + v.v10m * v.v10m) - 4.0;
-    } },
+    compute: function (v) { return v.t2m + 0.33 * svp(v.td2m) - 0.7 * v.ws - 4.0; } },
 
   humidity: { icon: '<path d="M7 16.5A3.8 3.8 0 0 0 10.8 12c0-1.1-.6-2.1-1.7-3S7.3 6.6 7 5.2c-.3 1.4-.9 2.7-2 3.6S3.2 10.9 3.2 12A3.8 3.8 0 0 0 7 16.5Z"/><path d="M16.5 20a4.5 4.5 0 0 0 4.5-4.5c0-1.3-.7-2.5-2-3.6s-2.2-2.7-2.5-4.4c-.3 1.7-1.2 3.3-2.5 4.4s-2 2.3-2 3.6A4.5 4.5 0 0 0 16.5 20Z"/>', tint: "#7dd3c0", label: "Relative humidity", unit: "%", vars: ["t2m", "td2m"],
     annual: "mean", dp: 0, derived: true,
-    compute: function (v) { return Math.min(100, 100 * svp(v.td2m - K) / svp(v.t2m - K)); } },
+    compute: function (v) { return Math.min(100, 100 * svp(v.td2m) / svp(v.t2m)); } },
 
   precipitation: { icon: '<path d="M20 15.5A4.5 4.5 0 0 0 17.5 7h-1.7A7 7 0 1 0 4 13.9"/><path d="M8 19v2m4-3v3m4-4v2"/>', tint: "#8ba4f9", label: "Rainfall", unit: "mm", vars: ["pr"], annual: "sum", dp: 0,
-    // kg m-2 s-1 is mm/s; scale to the month.
-    compute: function (v, days) { return v.pr * 86400 * days; } },
+    // Stored as mm/day; scale to the month.
+    compute: function (v, days) { return v.pr * days; } },
 
   liveability: {
     icon: '<path d="M3 11.5 12 4l9 7.5"/><path d="M5.5 10v9h13v-9"/><path d="M10 19v-5h4v5"/>',
     tint: "#7dd3c0", label: "Settling in", unit: "score",
     vars: [], statik: "liv", annual: "mean", dp: 0, derived: true,
-    note: "Country-level: entry access + income level, relative to "
-        + ((window.LIVEABILITY && window.LIVEABILITY.baseCity) || "home"),
+    note: "Country-level: entry access for your passport + income level vs home",
     compute: null,
   },
 
@@ -61,9 +55,9 @@ var METRICS = {
     compute: null,
   },
 
-  wind: { icon: '<path d="M17.7 7.7a2.5 2.5 0 1 1 1.8 4.3H2M9.6 4.6A2 2 0 1 1 11 8H2m8.8 11.4A2 2 0 1 0 12 16H2"/>', tint: "#a5b4c4", label: "Wind speed", unit: "km/h", vars: ["u10m", "v10m"], annual: "mean", dp: 1,
-    derived: true, note: "Vector mean of monthly winds; understates true average speed.",
-    compute: function (v) { return Math.sqrt(v.u10m * v.u10m + v.v10m * v.v10m) * 3.6; } },
+  wind: { icon: '<path d="M17.7 7.7a2.5 2.5 0 1 1 1.8 4.3H2M9.6 4.6A2 2 0 1 1 11 8H2m8.8 11.4A2 2 0 1 0 12 16H2"/>', tint: "#a5b4c4", label: "Wind speed", unit: "km/h", vars: ["ws"], annual: "mean", dp: 1,
+    derived: true, note: "Each month is a vector mean of hourly winds; understates true average speed.",
+    compute: function (v) { return v.ws * 3.6; } },
 };
 
 var DEW_TIERS = [
@@ -76,11 +70,13 @@ var dewTier = function (v) {
   for (var i = 0; i < DEW_TIERS.length; i++) if (v < DEW_TIERS[i].max) return DEW_TIERS[i];
 };
 var MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-var daysInMonth = function (y, m) { return new Date(Date.UTC(y, m + 1, 0)).getUTCDate(); };
+var MONTH_NAMES = ["January","February","March","April","May","June","July",
+                   "August","September","October","November","December"];
+// A ten-year normal spans leap years, so February is a quarter-day longer.
+var MDAYS = [31, 28.25, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 
 /* ---------------------------------------------------------------- places */
 
-var NLAT = 721, NLON = 1440;
 var rows = window.CITIES.rows, COUNTRIES = window.CITIES.countries, N = rows.length;
 var LAT = new Float32Array(N), LON = new Float32Array(N);
 for (var i = 0; i < N; i++) { LAT[i] = rows[i][5]; LON[i] = rows[i][6]; }
@@ -91,17 +87,46 @@ var describe = function (i) {
            country: (COUNTRIES[r[4]] || [r[4]])[0], lat: r[5], lon: r[6], pop: r[7] };
 };
 
-/* ------------------------------------------------------------ ERA5 layer */
+var b64bytes = function (s) {
+  var bin = atob(s), buf = new ArrayBuffer(bin.length), u8 = new Uint8Array(buf);
+  for (var i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+  return buf;
+};
 
-/* Air quality ships as a static per-city array: one annual number per place,
-   ~470 KB as int16, which is why it can be ranked like the ERA5 measures
-   instead of being a lookup limited to whatever is on screen. */
+/* --------------------------------------------------------- climate layer */
+
+/* Every place reads the 0.25 deg cell it sits in, and ~55k cells cover all
+   235k places, so each measure is computed once per cell and fanned out.
+   Places sharing a cell share a climate — the grid cannot tell them apart. */
+var CLIM = (function () {
+  var d = window.CLIMATE;
+  var cellOf = new Uint16Array(b64bytes(d.cellOf)), raw = new Int16Array(b64bytes(d.b64));
+  var C = d.cells, planes = {};
+  d.vars.forEach(function (v, vi) {
+    planes[v] = [];
+    for (var m = 0; m < 12; m++) {
+      var f = new Float32Array(C), off = (vi * 12 + m) * C;
+      for (var c = 0; c < C; c++) f[c] = raw[off + c] / d.scale;
+      planes[v].push(f);
+    }
+  });
+  // Places grouped by cell, so a cell order expands to a place order.
+  var start = new Uint32Array(C + 1), members = new Uint32Array(N);
+  for (var p = 0; p < N; p++) start[cellOf[p] + 1]++;
+  for (var k = 0; k < C; k++) start[k + 1] += start[k];
+  var fill = start.slice(0, C);
+  for (p = 0; p < N; p++) members[fill[cellOf[p]]++] = p;
+  return { cellOf: cellOf, cells: C, planes: planes, start: start, members: members,
+           from: d.from, to: d.to, source: d.source };
+})();
+var NORMALS = CLIM.from + "–" + CLIM.to;
+
+/* Air quality ships as a static per-place array, so it can be ranked like the
+   climate measures instead of being a lookup limited to whatever is on screen. */
 var PM25 = (function () {
   var d = window.PM25;
   if (!d || !d.b64) return null;
-  var bin = atob(d.b64), buf = new ArrayBuffer(bin.length), u8 = new Uint8Array(buf);
-  for (var i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
-  var raw = new Int16Array(buf), all = new Float32Array(raw.length);
+  var raw = new Int16Array(b64bytes(d.b64)), all = new Float32Array(raw.length);
   for (var j = 0; j < raw.length; j++)
     all[j] = raw[j] < 0 ? Infinity : raw[j] / d.scale;   // -1 marks no data
 
@@ -109,17 +134,13 @@ var PM25 = (function () {
   var planes = d.planes || 1, n = all.length / planes;
   var byPeriod = [];
   for (var p = 0; p < planes; p++) byPeriod.push(all.subarray(p * n, (p + 1) * n));
-  return {
-    annual: byPeriod[0],
-    month: byPeriod.slice(1),
-    values: byPeriod[0],          // default view stays the annual mean
-    year: d.year, source: d.source,
-  };
+  return { annual: byPeriod[0], month: byPeriod.slice(1), year: d.year, source: d.source };
 })();
 
-/* Liveability is a country-level score, so every city in a country shares it.
+/* Liveability is a country-level score, so every place in a country shares it.
    That means huge ties — which the distinct-value stepping already handles by
-   showing one representative per value. */
+   showing one representative per value. It depends on the passport, so it is
+   rebuilt whenever the passport changes. */
 var LIV_VALUES = null;
 function livValues() {
   if (LIV_VALUES) return LIV_VALUES;
@@ -136,249 +157,79 @@ function livValues() {
   return LIV_VALUES;
 }
 
-var zarr = null, IcechunkStore = null;
-var varCache = {}, indexCache = {}, inflight = {};
-
-/* Sampled layers persist in IndexedDB, which works on file:// and survives a
-   browser restart. Each entry is 12 x 235,157 float32 (~11 MB), so a full set
-   of metrics is around 56 MB. */
-var DB = "livably-cache", STORE = "vars";
-function idbOpen() {
-  return new Promise(function (res, rej) {
-    var r = indexedDB.open(DB, 1);
-    r.onupgradeneeded = function () { r.result.createObjectStore(STORE); };
-    r.onsuccess = function () { res(r.result); };
-    r.onerror = function () { rej(r.error); };
-  });
-}
-function cacheGet(k) {
-  return idbOpen().then(function (db) {
-    return new Promise(function (res) {
-      var rq = db.transaction(STORE).objectStore(STORE).get(k);
-      rq.onsuccess = function () { res(rq.result || null); };
-      rq.onerror = function () { res(null); };
-    });
-  }).catch(function () { return null; });
-}
-function cachePut(k, buf) {
-  return idbOpen().then(function (db) {
-    db.transaction(STORE, "readwrite").objectStore(STORE).put(buf, k);
-  }).catch(function () { /* caching is best-effort */ });
-}
-function cacheClear() {
-  return idbOpen().then(function (db) {
-    db.transaction(STORE, "readwrite").objectStore(STORE).clear();
-  }).catch(function () {});
-}
-
-async function deps() {
-  if (zarr) return;
-  phase("Loading reader");
-  // icechunk-js is pure TypeScript. The official @earthmover/icechunk package
-  // ships a Node napi binary whose browser build fails in a page with
-  // "napi_create_threadsafe_function"; this one has no WASM at all.
-  var ic = await import("https://esm.sh/icechunk-js");
-  zarr = await import("https://esm.sh/zarrita@0.7");
-  IcechunkStore = ic.IcechunkStore;
-}
-
-// Bilinear sample of a global 0.25 deg field. lat 90 -> -90, lon -179.75 -> 180.
-function sampleGrid(grid, off, out) {
-  for (var c = 0; c < N; c++) {
-    var fy = (90 - LAT[c]) / 0.25, fx = (LON[c] + 179.75) / 0.25;
-    if (fx < 0) fx += NLON;
-    var y0 = Math.floor(fy), x0 = Math.floor(fx), wy = fy - y0, wx = fx - x0;
-    if (y0 < 0) y0 = 0;
-    if (y0 > NLAT - 2) y0 = NLAT - 2;
-    var x1 = (x0 + 1) % NLON, r0 = off + y0 * NLON, r1 = off + (y0 + 1) * NLON;
-    out[c] = (grid[r0 + x0] * (1 - wx) + grid[r0 + x1] * wx) * (1 - wy)
-           + (grid[r1 + x0] * (1 - wx) + grid[r1 + x1] * wx) * wy;
+// Climate measure for one period, per cell. period: 0-11 a month, -1 the year.
+var cellCache = {};
+function cellValues(metric, period) {
+  var ck = metric + ":" + period;
+  if (cellCache[ck]) return cellCache[ck];
+  var spec = METRICS[metric], C = CLIM.cells, out = new Float32Array(C);
+  var vars = spec.vars, scratch = {}, c, m, v;
+  var read = function (cell, month) {
+    for (v = 0; v < vars.length; v++) scratch[vars[v]] = CLIM.planes[vars[v]][month][cell];
+    return spec.compute(scratch, MDAYS[month]);
+  };
+  for (c = 0; c < C; c++) {
+    if (period >= 0) { out[c] = read(c, period); continue; }
+    // Totals add up; means are day-weighted, so a 31-day month counts for
+    // more than February.
+    var acc = 0, days = 0;
+    for (m = 0; m < 12; m++) {
+      var x = read(c, m);
+      if (spec.annual === "sum") acc += x;
+      else { acc += x * MDAYS[m]; days += MDAYS[m]; }
+    }
+    out[c] = spec.annual === "sum" ? acc : acc / days;
   }
+  return (cellCache[ck] = out);
 }
 
-/* Opening a variable and decoding its time axis is worth doing once: the same
-   metadata answers "which years exist" and "where does this year start". */
-var varMeta = {};
-function openVar(v) {
-  if (varMeta[v]) return varMeta[v];
-  varMeta[v] = (async function () {
-    await deps();
-    var st = await IcechunkStore.open(era5Url(v));
-
-    // CF time: "days since <date>", and the start differs per variable
-    // (t2m begins 1940-01, pr 1940-04). Decode it, never assume an epoch.
-    var tArr = await zarr.open(st.resolve("/time"), { kind: "array" });
-    var units = (tArr.attrs && tArr.attrs.units) || "";
-    var u = /days since (\d{4})-(\d{2})-(\d{2})/.exec(units);
-    if (!u) throw new Error("unexpected time units on " + v + ": " + units);
-    var t0 = await zarr.get(tArr, [zarr.slice(0, 1)]);
-    var first = new Date(Date.UTC(+u[1], +u[2] - 1, +u[3]) + Number(t0.data[0]) * 86400000);
-    // Absolute month numbers turn "does this year fit" into a comparison.
-    return { store: st, firstAbs: first.getUTCFullYear() * 12 + first.getUTCMonth(),
-             months: tArr.shape[0] };
-  })();
-  // Clear the slot on failure, so one bad request doesn't wedge the variable.
-  varMeta[v]["catch"](function () { delete varMeta[v]; });
-  return varMeta[v];
-}
-// Newest year this variable covers from January to December.
-var lastFullYear = function (meta) {
-  return Math.floor((meta.firstAbs + meta.months - 12) / 12);
-};
-
-function loadVariable(v, year) {
-  var key = v + ":" + year;
-  if (varCache[key]) return Promise.resolve(varCache[key]);
-  if (inflight[key]) return inflight[key];
-
-  inflight[key] = (async function () {
-    var hit = await cacheGet(key);
-    if (hit) {
-      varCache[key] = new Float32Array(hit);
-      return varCache[key];
-    }
-
-    var meta = await openVar(v);
-    phase("Loading " + v + " climate layer");
-
-    var i0 = year * 12 - meta.firstAbs;
-    if (i0 < 0 || i0 + 12 > meta.months) throw new Error(v + " has no data for " + year);
-
-    var data = await zarr.open(meta.store.resolve("/" + v), { kind: "array" });
-    var chunk = await zarr.get(data, [zarr.slice(i0, i0 + 12), null, null]);
-    var grid = chunk.data;
-
-    phase("Mapping places onto the grid");
-    var out = new Float32Array(12 * N), scratch = new Float32Array(N);
-    for (var m = 0; m < 12; m++) {
-      sampleGrid(grid, m * NLAT * NLON, scratch);
-      out.set(scratch, m * N);
-    }
-    chunk = null;              // release the raw global grid promptly
-    varCache[key] = out;
-    cachePut(key, out.buffer.slice(0));
-    return out;
-  })();
-  // Clear the slot either way, so one failure doesn't wedge the metric forever.
-  inflight[key]["catch"](function () {})["then"](function () { delete inflight[key]; });
-  return inflight[key];
-}
-
-/* ------------------------------------------------------------------- year */
-
-/* The year is not a choice, so the app doesn't offer one. There is a single
-   right answer — the most recent year the archive covers from January to
-   December — and it is read from the archive rather than hard-coded. ERA5
-   lands days behind real time, so the newest year that could possibly be
-   complete is the last one that has finished. */
-var FALLBACK_YEAR = 2024;
-var newestPossibleYear = function () { return new Date().getUTCFullYear() - 1; };
-
-var ERA5_VARS = (function () {
-  var seen = {};
-  Object.keys(METRICS).forEach(function (k) {
-    METRICS[k].vars.forEach(function (v) { seen[v] = 1; });
-  });
-  return Object.keys(seen);
-})();
-
-var yearReady = null;
-function ensureYear() {
-  if (yearReady) return yearReady;
-  var newest = newestPossibleYear(), saved = store.get("dataYear", null);
-
-  // Only ask the archive again when the calendar says a newer year could exist.
-  if (saved && saved.year && saved.checked >= newest) {
-    state.year = saved.year;
-    return (yearReady = Promise.resolve(saved.year));
+// Any measure, any period, one value per place.
+var valueCache = {};
+function valuesFor(metric, period) {
+  var ck = metric + ":" + period;
+  if (valueCache[ck]) return valueCache[ck];
+  var spec = METRICS[metric], out;
+  if (spec.statik === "pm25") {
+    // Air quality has real monthly fields, so it follows the period like
+    // every other measure. Liveability genuinely has none, so it does not.
+    out = PM25 && (period >= 0 && PM25.month.length === 12 ? PM25.month[period] : PM25.annual);
+    if (!out) throw new Error(spec.label + " data not loaded");
+  } else if (spec.statik === "liv") {
+    return livValues();                       // passport-dependent, never cached here
+  } else {
+    var cv = cellValues(metric, period), cellOf = CLIM.cellOf;
+    out = new Float32Array(N);
+    for (var p = 0; p < N; p++) out[p] = cv[cellOf[p]];
   }
-
-  yearReady = (async function () {
-    try {
-      phase("Finding the latest complete year");
-      var metas = await Promise.all(ERA5_VARS.map(openVar));
-      // Every measure must have the year, or the set would be ragged.
-      var y = Math.min.apply(null, metas.map(lastFullYear));
-      if (!isFinite(y)) throw new Error("no complete year in the archive");
-      store.set("dataYear", { year: y, checked: newest });
-      state.year = y;
-    } catch (e) {
-      // Offline with a warm cache still deserves to work: keep what we knew.
-      state.year = (saved && saved.year) || FALLBACK_YEAR;
-    }
-    // Anything already on screen was labelled with a guess; correct it.
-    var scr = currentScreen();
-    if (scr && ctl(scr.ctl)) ctl(scr.ctl).paint();
-    paintStatus();
-    return state.year;
-  })();
-  return yearReady;
+  return (valueCache[ck] = out);
 }
 
-// period: 0-11 for a month, -1 for the annual figure.
-async function buildIndex(metric, year, period) {
-  var ck = metric + ":" + year + ":" + period;
+/* Values plus every place in ascending order. A climate order is a sort of
+   ~55k cells expanded through the cell membership lists — an order of
+   magnitude cheaper than sorting 235k places one by one. */
+var indexCache = {};
+function buildIndex(metric, period) {
+  var spec = METRICS[metric], ck = metric + ":" + period + (spec.statik === "liv" ? ":" + state.passport : "");
   if (indexCache[ck]) return indexCache[ck];
+  var values = valuesFor(metric, period), order = new Uint32Array(N), i;
 
-  var spec = METRICS[metric], loaded = {};
-
-  if (spec.statik) {
-    var vS;
-    if (spec.statik === "pm25") {
-      // Air quality has real monthly fields, so it follows the period like
-      // every other measure. Liveability genuinely has none, so it does not.
-      vS = PM25 && (period >= 0 && PM25.month.length === 12
-                      ? PM25.month[period] : PM25.annual);
-    } else {
-      vS = livValues();
-    }
-    if (!vS) throw new Error(spec.label + " data not loaded");
-    var ordS = new Uint32Array(N);
-    for (var c0 = 0; c0 < N; c0++) ordS[c0] = c0;
-    ordS.set(Array.prototype.slice.call(ordS).sort(function (a, b) {
-      return vS[a] - vS[b];
-    }));
-    indexCache[ck] = { values: vS, order: ordS };
-    return indexCache[ck];
+  if (!spec.statik) {
+    var cv = cellValues(metric, period), cells = [];
+    for (i = 0; i < CLIM.cells; i++) cells.push(i);
+    cells.sort(function (a, b) { return cv[a] - cv[b]; });
+    var w = 0;
+    for (i = 0; i < cells.length; i++)
+      for (var j = CLIM.start[cells[i]]; j < CLIM.start[cells[i] + 1]; j++) order[w++] = CLIM.members[j];
+  } else {
+    var tmp = [];
+    for (i = 0; i < N; i++) tmp.push(i);
+    tmp.sort(function (a, b) {
+      var x = values[a], y = values[b];
+      return x === y ? 0 : x < y ? -1 : 1;     // Infinity (no data) sorts last
+    });
+    order.set(tmp);
   }
-
-  for (var k = 0; k < spec.vars.length; k++)
-    loaded[spec.vars[k]] = await loadVariable(spec.vars[k], year);
-
-  phase("Building sorted index");
-  await new Promise(function (r) { setTimeout(r, 0); });   // let the spinner paint
-
-  var values = new Float32Array(N), scratch = {}, c, m, v;
-  for (c = 0; c < N; c++) {
-    if (period >= 0) {
-      for (v = 0; v < spec.vars.length; v++) scratch[spec.vars[v]] = loaded[spec.vars[v]][period * N + c];
-      values[c] = spec.compute(scratch, daysInMonth(year, period));
-    } else if (spec.annual === "sum") {
-      var total = 0;
-      for (m = 0; m < 12; m++) {
-        for (v = 0; v < spec.vars.length; v++) scratch[spec.vars[v]] = loaded[spec.vars[v]][m * N + c];
-        total += spec.compute(scratch, daysInMonth(year, m));
-      }
-      values[c] = total;
-    } else {
-      // Day-weighted, so a 31-day month counts for more than February.
-      var acc = 0, days = 0;
-      for (m = 0; m < 12; m++) {
-        var d = daysInMonth(year, m);
-        for (v = 0; v < spec.vars.length; v++) scratch[spec.vars[v]] = loaded[spec.vars[v]][m * N + c];
-        acc += spec.compute(scratch, d) * d;
-        days += d;
-      }
-      values[c] = acc / days;
-    }
-  }
-
-  var order = new Uint32Array(N);
-  for (c = 0; c < N; c++) order[c] = c;
-  order.set(Array.prototype.slice.call(order).sort(function (a, b) { return values[a] - values[b]; }));
-
-  indexCache[ck] = { values: values, order: order };
-  return indexCache[ck];
+  return (indexCache[ck] = { values: values, order: order });
 }
 
 /* Pure value-based neighbours. Never geography, never proximity.
@@ -472,10 +323,22 @@ var asList = function (k, legacy) {
   var old = store.get(legacy, "");
   return old ? [old] : [];
 };
+/* Settling in means nothing without knowing whose passport is travelling. The
+   browser's locale is a fair first guess; the visitor can change it anywhere. */
+function guessPassport() {
+  var have = (window.LIVEABILITY && window.LIVEABILITY.passports) || {};
+  var langs = navigator.languages || [navigator.language || ""];
+  for (var i = 0; i < langs.length; i++) {
+    var m = /[-_]([A-Za-z]{2})\b/.exec(langs[i] || "");
+    if (m && have[m[1].toUpperCase()]) return m[1].toUpperCase();
+  }
+  return have.IN ? "IN" : Object.keys(have)[0] || "";
+}
+
 var state = {
   city: store.get("city", null), metric: store.get("metric", "dew_point"),
   period: store.get("period", -1),
-  year: (store.get("dataYear", null) || {}).year || FALLBACK_YEAR,
+  passport: store.get("passport", null) || guessPassport(),
   fahrenheit: store.get("fahrenheit", false), recents: store.get("recents", []),
   minPop: store.get("minPop", 0),
   continents: asList("continents", "continent"),
@@ -483,6 +346,15 @@ var state = {
   // metricKey -> {min, max}; constrains results by other measures too.
   ranges: store.get("ranges", {}),
   favs: store.get("favs", []),
+  entry: store.get("entry", "any"),
+  // The month whose weather Follow-the-weather keeps; null picks the best one.
+  chaseMonth: null,
+};
+// How easily the passport gets you in, as a filter shared by every screen.
+var ENTRY = {
+  any:  { label: "Any entry rules", ok: null },
+  easy: { label: "Visa-free, on arrival or e-visa", ok: { F: 1, A: 1, E: 1 } },
+  free: { label: "No visa needed ahead", ok: { F: 1, A: 1 } },
 };
 var POP_TIERS = [[0,"Any size"],[5000,"5k+"],[50000,"50k+"],[250000,"250k+"],[1000000,"1M+"]];
 
@@ -679,24 +551,54 @@ function paintFavCount() {
   }
 }
 
-/* Liveability, relative to the base country in data/liveability.js.
-   Returns null for anywhere unrated, and the UI says "not rated" rather than
-   pretending a gap is a low score. */
-var LIV = window.LIVEABILITY || { base: "", weights: {}, countries: {}, labels: {} };
+/* Liveability for the passport the visitor holds. Entry rules come from the
+   full passport x destination matrix; income is stored relative to one
+   reference country and re-based onto the passport's own country here, which on
+   a log scale is a subtraction. Returns null for anywhere unrated, and the UI
+   says "not rated" rather than pretending a gap is a low score. */
+var LIV = window.LIVEABILITY || { weights: {}, labels: {}, codes: {}, dests: "", passports: {}, income: {} };
+var LIV_DEST = (function () {
+  var at = {};
+  for (var i = 0; i < LIV.dests.length; i += 2) at[LIV.dests.substr(i, 2)] = i / 2;
+  return at;
+})();
+var livMemo = {};
+
+function visaCode(cc) {
+  var row = LIV.passports[state.passport];
+  if (!row || !(cc in LIV_DEST)) return null;
+  var ch = row.charAt(LIV_DEST[cc]);
+  return ch in LIV.codes ? ch : null;
+}
+var VISA_WORDS = { F: "visa-free", A: "visa on arrival", E: "e-visa", R: "visa required", X: "no entry" };
 
 function livScore(cc) {
-  var row = LIV.countries && LIV.countries[cc];
-  if (!row) return null;
+  var key = state.passport + ":" + cc;
+  if (key in livMemo) return livMemo[key];
+  var fields = {}, code = visaCode(cc);
+  if (code) fields.visa = LIV.codes[code];
+  var inc = LIV.income[cc], home = LIV.income[state.passport];
+  if (inc != null && home != null)
+    fields.income = Math.max(0, Math.min(100, inc - home + 50));
   var total = 0, used = 0, parts = [];
   Object.keys(LIV.weights).forEach(function (k) {
-    var v = row[k];
+    var v = fields[k];
     if (v == null || !isFinite(v)) return;       // missing field, not a zero
     var w = LIV.weights[k];
     total += v * w; used += w;
     parts.push({ key: k, label: (LIV.labels || {})[k] || k, value: v });
   });
-  if (!used) return null;
-  return { score: Math.round(total / used), parts: parts, source: row.source || "" };
+  return (livMemo[key] = used
+    ? { score: Math.round(total / used), parts: parts, visa: code, source: LIV.source || "" }
+    : null);
+}
+
+function setPassport(cc) {
+  if (!LIV.passports[cc] || cc === state.passport) return;
+  state.passport = cc;
+  store.set("passport", cc);
+  LIV_VALUES = null;                 // every settling-in figure just changed
+  paintPassport();
 }
 
 // Small outward links, on every row as well as the place page.
@@ -712,8 +614,9 @@ function livBadge(cc) {
   var r = livScore(cc);
   if (!r) return "";
   var band = r.score >= 70 ? "good" : r.score >= 45 ? "mid" : "low";
-  return '<span class="liv ' + band + '" title="Settling-in score vs '
-    + (LIV.baseCity || LIV.base) + " — " + r.parts.map(function (p) {
+  return '<span class="liv ' + band + '" title="Settling-in score on a '
+    + countryName(state.passport) + " passport"
+    + (r.visa ? " (" + VISA_WORDS[r.visa] + ")" : "") + " — " + r.parts.map(function (p) {
         return p.label + " " + p.value;
       }).join(", ") + '">' + r.score + "</span>";
 }
@@ -740,8 +643,8 @@ function paintStatus() {
   $("#sbMetric").style.setProperty("--tint", spec.tint);
   $("#sbPeriod").textContent = periodLabel(state.period)
     + (isAnnualOnly(state.metric) && state.period >= 0 ? " (no monthly cycle)" : "");
-  $("#sbYear").textContent = state.year;
-  $("#sbYear").title = "Latest complete year in the ERA5 archive";
+  $("#sbYear").textContent = NORMALS;
+  $("#sbYear").title = "Ten-year climate normals from ERA5 reanalysis";
 
   // The whole point of a status strip is the number, not just the label.
   var vEl = $("#sbValue");
@@ -758,6 +661,7 @@ function paintStatus() {
   else if (state.continents.length) bits.push(summarise(state.continents));
   var nr = activeRanges().length;
   if (nr) bits.push(nr + " range" + (nr === 1 ? "" : "s"));
+  if (state.entry !== "any") bits.push(state.entry === "free" ? "no visa ahead" : "easy entry");
   $("#sbFilters").textContent = bits.length ? bits.join(" · ") : "No filters";
   $("#sbClear").hidden = !bits.length;
   $("#sbFilters").hidden = !bits.length;
@@ -765,13 +669,17 @@ function paintStatus() {
   var fav = isFav(state.city.id);
   $("#sbFav").textContent = fav ? "★ Saved" : "☆ Save";
   $("#sbFav").classList.toggle("on", fav);
+  syncHash();
 }
 
+var profileFor = null;           // which place the profile cards were drawn for
 function show(name) {
-  ["start", "profile", "compare", "favs", "overall"].forEach(function (s) { $("#" + s).hidden = s !== name; });
+  // Re-anchoring elsewhere moves the place; its page must follow, not linger.
+  if (name === "profile" && state.city && profileFor !== state.city.id) return selectCity(state.city);
+  ["start", "profile", "compare", "favs", "overall", "chase"].forEach(function (s) { $("#" + s).hidden = s !== name; });
   // Coming back to the place page after changing the month elsewhere: the
   // cards are redrawn for the period that is now selected.
-  if (name === "profile" && lastProfile) renderProfile(lastProfile, profileMore);
+  if (name === "profile" && lastProfile) renderProfile(lastProfile);
   window.scrollTo(0, 0);
   paintStatus();
 }
@@ -839,6 +747,8 @@ $("#locate").addEventListener("click", function () {
 async function selectCity(city) {
   state.city = city;
   store.set("city", city);
+  state.chaseMonth = null;             // a new place has its own best month
+  profileFor = city.id;
   lastProfile = null;                  // the old place's cards are not this one's
   paintStatus();
   state.recents = [city].concat(state.recents.filter(function (c) { return c.id !== city.id; })).slice(0, 6);
@@ -852,56 +762,35 @@ async function selectCity(city) {
   renderPlaceExtras(city);
   paintFavStar(city);
   applyDaylight(city);
-  $("#metricGrid").innerHTML = '<p class="meta">Loading climate data… the first '
-    + 'metric pulls a global layer and takes a moment. Later ones are instant.</p>';
   paintProfileSource();
   show("profile");
 
-  // Each metric needs its own global layer, so they arrive over tens of seconds.
-  // Render them one at a time instead of making the page wait for all of them.
-  var token = ++profileSeq;
+  // Everything is local now, so the whole profile lands in one pass.
   try {
-    // Which year that is comes from the archive, so say so once it is known.
-    await ensureYear();
-    if (token !== profileSeq) return;
-    renderPlaceExtras(city);
-    paintProfileSource();
-    paintStatus();
-
     var prof = {}, keys = Object.keys(METRICS);
     for (var i = 0; i < keys.length; i++) {
-      var annual = await buildIndex(keys[i], state.year, -1), months = [];
-      for (var m = 0; m < 12; m++)
-        months.push((await buildIndex(keys[i], state.year, m)).values[city.idx]);
-      if (token !== profileSeq) return;      // a different place was chosen
-      prof[keys[i]] = { annual: annual.values[city.idx], months: months };
-      applyMood(prof.temperature && prof.temperature.annual,
-                prof.dew_point && prof.dew_point.annual);
-      applyScene(prof);
-      lastProfile = prof;
-      profileMore = i + 1 < keys.length;
-      renderSimilar(city);
-      renderProfile(prof, profileMore);
+      var months = [];
+      for (var m = 0; m < 12; m++) months.push(valuesFor(keys[i], m)[city.idx]);
+      prof[keys[i]] = { annual: valuesFor(keys[i], -1)[city.idx], months: months };
     }
+    applyMood(prof.temperature.annual, prof.dew_point.annual);
+    applyScene(prof);
+    lastProfile = prof;
+    renderSimilar(city);
+    renderChaseCta(city);
+    renderProfile(prof);
   } catch (err) {
-    if (token === profileSeq)
-      $("#metricGrid").innerHTML = '<p class="err">' + err.message + "</p>";
+    $("#metricGrid").innerHTML = '<p class="err">' + err.message + "</p>";
   }
+  syncHash();
 }
-var profileSeq = 0;
-var lastProfile = null, profileMore = false;
+var lastProfile = null;
 
 function paintProfileSource() {
-  $("#profileSource").innerHTML = "ERA5 reanalysis, " + state.year
-    + " — the latest year the archive covers end to end"
-    + " · 0.25° grid · annual figures are day-weighted means (rainfall is a total). "
-    + '<button id="clearCache" class="linkish">Clear downloaded climate data</button>';
-  $("#clearCache").addEventListener("click", function () {
-    cacheClear().then(function () {
-      varCache = {}; indexCache = {}; varMeta = {};
-      $("#clearCache").textContent = "Cleared — next metric will re-download.";
-    });
-  });
+  $("#profileSource").textContent = "ERA5 reanalysis, " + NORMALS
+    + " monthly normals (ten-year means) · 0.25° grid (~28 km) · annual figures are"
+    + " day-weighted means (rainfall is a total) · air quality "
+    + (PM25 ? PM25.year : "") + ", SatPM2.5";
 }
 
 function coords(la, lo) {
@@ -910,17 +799,15 @@ function coords(la, lo) {
 }
 
 /* The places most like this one overall — not nearby, but climatically closest.
-   Each loaded measure is standardised (z-score across every settlement) so that
-   millimetres of rain and degrees of dew point carry comparable weight, then we
-   take the smallest Euclidean distance in that space. */
+   Each climate measure is standardised (z-score across every settlement) so
+   that millimetres of rain and degrees of dew point carry comparable weight,
+   then we take the smallest Euclidean distance in that space. Air and settling
+   in are not climate, so they stay out of it. */
 function similarPlaces(idx, n) {
-  var keys = Object.keys(METRICS).filter(function (k) {
-    return indexCache[k + ":" + state.year + ":-1"];
-  });
-  if (!keys.length) return { list: [], used: 0 };
+  var keys = Object.keys(METRICS).filter(function (k) { return !METRICS[k].statik; });
 
   var dims = keys.map(function (k) {
-    var v = indexCache[k + ":" + state.year + ":-1"].values;
+    var v = valuesFor(k, -1);
     var sum = 0, sq = 0;
     for (var i = 0; i < N; i++) {
       if (!isFinite(v[i])) return null;        // gappy measure sits this out
@@ -1001,16 +888,16 @@ function renderPlaceExtras(city) {
       + encodeURIComponent(city.lat + "," + city.lon) + '">Map</a>';
   box.appendChild(links);
 
-  // The year is not a choice — it is whatever the archive last completed.
+  // Ten years, not one: a single year is weather, and a freak summer would
+  // move a place. Which ten is fixed when the data is built.
   var yr = el("label", "pe-year");
-  yr.innerHTML = "<span>Year</span>";
-  var val = el("span", "cchip", String(state.year));
-  val.title = "The latest year ERA5 covers from January to December";
+  yr.innerHTML = "<span>Climate</span>";
+  var val = el("span", "cchip", NORMALS);
+  val.title = "Ten-year monthly normals from ERA5 reanalysis";
   yr.appendChild(val);
   box.appendChild(yr);
 }
 
-// Rendered once the annual indexes exist, so it can span every loaded measure.
 function renderSimilar(city) {
   var box = $("#placeSimilar");
   if (!box) return;
@@ -1039,16 +926,9 @@ function renderSimilar(city) {
   box.appendChild(wrap);
 }
 
-function renderProfile(prof, more) {
+function renderProfile(prof) {
   var g = $("#metricGrid");
   g.innerHTML = "";
-  if (more) {
-    var p = document.createElement("p");
-    p.className = "meta";
-    p.style.gridColumn = "1/-1";
-    p.textContent = "Loading the remaining measures…";
-    g.appendChild(p);
-  }
   Object.keys(METRICS).forEach(function (key) {
     var spec = METRICS[key], d = prof[key];
     if (!d) return;
@@ -1192,11 +1072,16 @@ function rowFilter(bounds) {
   var minPop = state.minPop;
   var cc = state.countries.length ? setOf(state.countries) : null;
   var cont = state.continents.length ? setOf(state.continents) : null;
+  var entry = ENTRY[state.entry] ? ENTRY[state.entry].ok : null, entryMemo = {};
   return function (i) {
     var r = rows[i];
     if (minPop && r[7] < minPop) return false;
     if (cc) { if (!cc[r[4]]) return false; }
     else if (cont) { var m = COUNTRIES[r[4]]; if (!m || !cont[m[1]]) return false; }
+    if (entry) {
+      if (!(r[4] in entryMemo)) entryMemo[r[4]] = !!entry[visaCode(r[4])];
+      if (!entryMemo[r[4]]) return false;
+    }
     for (var b = 0; b < bounds.length; b++) {
       var v = bounds[b].values[i];
       if (bounds[b].min != null && v < bounds[b].min) return false;
@@ -1208,26 +1093,24 @@ function rowFilter(bounds) {
 
 var anyFilter = function () {
   return !!(state.minPop || state.continents.length || state.countries.length
-            || activeRanges().length);
+            || state.entry !== "any" || activeRanges().length);
 };
 
 function clearFilters() {
   state.minPop = 0; state.continents = []; state.countries = []; state.ranges = {};
+  state.entry = "any";
   store.set("minPop", 0); store.set("continents", []); store.set("countries", []);
-  store.set("ranges", {});
+  store.set("ranges", {}); store.set("entry", "any");
 }
 
 /* Each constraining measure needs its own layer, loaded on demand — and each
    is read for the period on screen, so a July comparison is refined by July
    figures. A measure with no monthly cycle contributes its annual value. */
-async function activeBounds() {
-  var act = activeRanges(), bounds = [];
-  for (var a = 0; a < act.length; a++) {
-    phase("Applying " + METRICS[act[a].metric].label.toLowerCase() + " filter");
-    var bi = await buildIndex(act[a].metric, state.year, periodFor(act[a].metric));
-    bounds.push({ values: bi.values, min: act[a].min, max: act[a].max });
-  }
-  return bounds;
+function activeBounds(period) {
+  var p0 = period == null ? state.period : period;
+  return activeRanges().map(function (r) {
+    return { values: valuesFor(r.metric, isAnnualOnly(r.metric) ? -1 : p0), min: r.min, max: r.max };
+  });
 }
 
 // Which other measures are currently constraining the result.
@@ -1372,9 +1255,12 @@ function renderControls(host, o) {
     periods.appendChild(b);
     periodBtns.push([b, p]);
   };
-  mk("Year", -1);
-  MONTHS.forEach(function (m, i) { mk(m, i); });
-  top.appendChild(periods);
+  // Follow-the-weather spans all twelve months, so it has no period to pick.
+  if (o.period !== false) {
+    mk("Year", -1);
+    MONTHS.forEach(function (m, i) { mk(m, i); });
+    top.appendChild(periods);
+  }
 
   var measureSel = null;
   if (o.measure) {
@@ -1395,7 +1281,7 @@ function renderControls(host, o) {
     });
     top.appendChild(measureSel);
   }
-  host.appendChild(top);
+  if (top.childNodes.length > 1) host.appendChild(top);
 
   var note = el("p", "ctl-note");
   host.appendChild(note);
@@ -1446,6 +1332,25 @@ function renderControls(host, o) {
 
     filters.appendChild(countrySlot);
     buildCountries();
+
+    // Somewhere you cannot get into is not an option, however good the weather.
+    var entry = el("select", "pill");
+    entry.title = "Only places your passport can enter this easily";
+    Object.keys(ENTRY).forEach(function (k) {
+      var op = el("option", null, ENTRY[k].label);
+      op.value = k;
+      op.selected = k === state.entry;
+      entry.appendChild(op);
+    });
+    entry.addEventListener("change", function () {
+      state.entry = entry.value;
+      store.set("entry", state.entry);
+      paint();
+      paintStatus();
+      o.rerun();
+    });
+    entry.classList.toggle("on", state.entry !== "any");
+    filters.appendChild(entry);
 
     var clr = el("button", "linkish ctl-clear", "Clear filters");
     clr.type = "button";
@@ -1554,7 +1459,8 @@ function renderControls(host, o) {
     var n = activeRanges().length;
     summaryLabel.textContent =
       (n ? "Refine — " + n + " active" : "Refine by other measures")
-      + " · applied to " + periodName(state.period) + " " + state.year;
+      + (o.period === false ? " · applied month by month"
+                            : " · applied to " + periodName(state.period));
     refine.classList.toggle("on", n > 0);
 
     var clearBtn = filters.querySelector(".ctl-clear");
@@ -1587,13 +1493,12 @@ async function showFavourites() {
   }
   box.innerHTML = '<p class="meta">Loading…</p>';
 
-  await ensureYear();
   var spec = METRICS[state.metric], period = periodFor(state.metric);
   $("#favSub").textContent = spec.label + " · "
-    + (period < 0 ? "annual" : MONTHS[period]) + " · " + state.year;
+    + (period < 0 ? "annual" : MONTHS[period]) + " · " + NORMALS;
 
-  var index = await buildIndex(state.metric, state.year, period);
-  var bounds = await activeBounds();
+  var index = await buildIndex(state.metric, period);
+  var bounds = activeBounds();
   if (mine !== favSeq) return;
 
   // The same filters as everywhere else — a favourite outside them is set
@@ -1643,7 +1548,7 @@ async function showFavourites() {
 
   $("#favSource").textContent = "Ranked among your saved places only, on the same "
     + "measure and period as every other screen. ERA5 reanalysis, "
-    + state.year + " (latest complete year), 0.25° grid"
+    + NORMALS + " normals, 0.25° grid"
     + (spec.derived ? " · derived value" : "");
 }
 
@@ -1682,7 +1587,6 @@ async function showOverall() {
   $("#ovProgress").hidden = false;
   $("#ovResults").innerHTML = "";
   await new Promise(function (r) { setTimeout(r, 0); });
-  await ensureYear();
 
   var anchor = state.city.idx, comps = [], names = [], i, k;
 
@@ -1690,7 +1594,7 @@ async function showOverall() {
   var climKeys = Object.keys(METRICS).filter(function (m) { return !METRICS[m].statik; });
   var dims = [];
   for (k = 0; k < climKeys.length; k++) {
-    var v = (await buildIndex(climKeys[k], state.year, periodFor(climKeys[k]))).values;
+    var v = valuesFor(climKeys[k], periodFor(climKeys[k]));
     var sum = 0, sq = 0, bad = false;
     for (i = 0; i < N; i++) {
       if (!isFinite(v[i])) { bad = true; break; }
@@ -1716,8 +1620,7 @@ async function showOverall() {
 
   // Air follows the period like everywhere else; settling in has no months.
   if (PM25) {
-    var air = await buildIndex("air_quality", state.year, periodFor("air_quality"));
-    comps.push({ key: "air", pct: percentiles(air.values, true) });
+    comps.push({ key: "air", pct: percentiles(valuesFor("air_quality", periodFor("air_quality")), true) });
     names.push("air quality");
   }
 
@@ -1730,7 +1633,7 @@ async function showOverall() {
   comps.forEach(function (c) { wsum += (ovWeights[c.key] || 0); });
   if (!wsum) wsum = 1;
 
-  var score = new Float32Array(N), pass = rowFilter(await activeBounds());
+  var score = new Float32Array(N), pass = rowFilter(activeBounds());
   if (mine !== ovSeq) return;
   for (i = 0; i < N; i++) {
     var tot = 0, ok = true;
@@ -1757,7 +1660,7 @@ async function showOverall() {
   $("#ovProgress").hidden = true;
   $("#ovSub").textContent = "Every place scored on " + names.join(", ")
     + " \u00b7 relative to " + state.city.name
-    + " \u00b7 " + (state.period < 0 ? "annual" : MONTHS[state.period]) + " \u00b7 " + state.year;
+    + " \u00b7 " + (state.period < 0 ? "annual" : MONTHS[state.period]) + " \u00b7 " + NORMALS;
 
   var box = $("#ovResults");
   box.innerHTML = "";
@@ -1814,17 +1717,16 @@ async function runCompare() {
   var mine = ++compareSeq, spec = METRICS[state.metric];
   $("#progress").hidden = false;
   phase("Preparing");
-  await ensureYear();
 
   // Liveability is genuinely annual-only; air quality has monthly fields.
   var period = periodFor(state.metric);
   $("#cmpTitle").textContent = spec.label + " closest to " + state.city.name;
   $("#cmpSub").textContent = (isAnnualOnly(state.metric) ? "annual only" :
-      period < 0 ? "annual" : MONTHS[period]) + " · " + state.year;
+      period < 0 ? "annual" : MONTHS[period]) + " · " + NORMALS;
 
   try {
-    var index = await buildIndex(state.metric, state.year, period);
-    var bounds = await activeBounds();
+    var index = await buildIndex(state.metric, period);
+    var bounds = activeBounds();
     if (mine !== compareSeq) return;          // a newer request owns the screen
 
     // Monthly shape of the active metric — same layer, so this costs no network.
@@ -1832,20 +1734,14 @@ async function runCompare() {
     if (!spec.statik || spec.monthly) {
       monthly = [];
       for (var mm = 0; mm < 12; mm++)
-        monthly.push((await buildIndex(state.metric, state.year, mm)).values);
+        monthly.push(valuesFor(state.metric, mm));
     }
 
-    // Any other measure whose layers are already loaded rides along for free.
+    // Every other measure rides along on the row; it is all local.
     var extras = [];
-    var mk = Object.keys(METRICS);
-    for (var e = 0; e < mk.length; e++) {
-      if (mk[e] === state.metric) continue;
-      var need = METRICS[mk[e]].vars, have = true;
-      for (var nv = 0; nv < need.length; nv++)
-        if (!varCache[need[nv] + ":" + state.year]) { have = false; break; }
-      if (have) extras.push({ key: mk[e],
-        values: (await buildIndex(mk[e], state.year, periodFor(mk[e]))).values });
-    }
+    Object.keys(METRICS).forEach(function (k) {
+      if (k !== state.metric) extras.push({ key: k, values: valuesFor(k, periodFor(k)) });
+    });
     if (mine !== compareSeq) return;
 
     var anchor = index.values[state.city.idx];
@@ -1998,8 +1894,8 @@ function renderResults(index, anchor, nb, monthly, extras) {
 
   $("#cmpSource").textContent =
     "Ranked against all " + N.toLocaleString() + " settlements in the GeoNames catalogue, "
-    + "purely by " + spec.label.toLowerCase() + " value. ERA5 reanalysis, " + state.year
-    + " (latest complete year), 0.25° grid" + (spec.derived ? " · derived value" : "")
+    + "purely by " + spec.label.toLowerCase() + " value. ERA5 reanalysis, " + NORMALS
+    + " normals, 0.25° grid" + (spec.derived ? " · derived value" : "")
     + (spec.note ? " · " + spec.note : "")
     + (whereShown() ? " · showing only " + whereShown() : "");
 }
@@ -2022,6 +1918,260 @@ function reanchor(city, rerun) {
   (rerun || runCompare)();
 }
 
+/* ---------------------------------------------------- follow the weather */
+
+/* The question people actually bring is not "where else reads 12.4 degC" but
+   "how do I keep the weather I love". So one place in one month becomes the
+   target, and every month of the year gets the places on Earth that have that
+   climate then — or the verdict that home already does.
+
+   Distance is counted in comfort steps rather than z-scores: 2 degC of
+   temperature, 2 degC of dew point, ~6 km/h of wind and 1.5 steps in the square
+   root of monthly rain each count as one. Rain goes through a square root
+   because 20 vs 60 mm is a different month and 220 vs 260 mm is not. Fixed
+   steps keep a "close" match meaning the same thing in every month. */
+var CHASE_STEP = { t: 2, td: 2, ws: 6 / 3.6, rain: 1.5 };
+var CHASE_STAY = 1.5;          // home within this many steps: no need to move
+
+function climateAt(cell, m) {
+  var P = CLIM.planes, pr = P.pr[m][cell] * MDAYS[m];
+  return { t: P.t2m[m][cell], td: P.td2m[m][cell], ws: P.ws[m][cell],
+           mm: pr, rain: Math.sqrt(Math.max(0, pr)) };
+}
+function chaseDist(a, b) {
+  var dt = (a.t - b.t) / CHASE_STEP.t, dd = (a.td - b.td) / CHASE_STEP.td;
+  var dw = (a.ws - b.ws) / CHASE_STEP.ws, dr = (a.rain - b.rain) / CHASE_STEP.rain;
+  return Math.sqrt(dt * dt + dd * dd + dw * dw + dr * dr);
+}
+var matchWord = function (d) {
+  return d < 0.75 ? "Spot on" : d < 1.5 ? "Very close" : d < 2.5 ? "Close" : "Nearest there is";
+};
+
+/* Which months a place is pleasant in: feels-like near 22 degC, not muggy, not
+   a washout. Deliberately plain, because it only chooses a sensible default
+   target month — the visitor can pick any other. */
+function comfortPenalty(cell, m) {
+  var k = climateAt(cell, m);
+  var feels = METRICS.feels_like.compute({ t2m: k.t, td2m: k.td, ws: k.ws });
+  return Math.abs(feels - 22) + 0.8 * Math.max(0, k.td - 16) + Math.max(0, k.mm - 90) / 40;
+}
+function bestMonths(idx) {
+  var cell = CLIM.cellOf[idx], pen = [], best = 0;
+  for (var m = 0; m < 12; m++) {
+    pen.push(comfortPenalty(cell, m));
+    if (pen[m] < pen[best]) best = m;
+  }
+  var good = [];
+  for (m = 0; m < 12; m++) if (pen[m] <= 4) good.push(m);
+  return { best: best, good: good };
+}
+
+// Month runs written the way people say them: "May–Jun, Sep–Oct".
+function monthRuns(list) {
+  if (!list.length) return "";
+  if (list.length === 12) return "all year";
+  var on = {}, out = [];
+  list.forEach(function (m) { on[m] = 1; });
+  var start = 0;
+  while (on[start] && start < 12) start++;        // begin after a gap, so runs wrap
+  for (var i = 0; i < 12; i++) {
+    var m = (start + i) % 12;
+    if (!on[m] || on[(m + 11) % 12]) continue;
+    var e = m;
+    while (on[(e + 1) % 12] && (e + 1) % 12 !== m) e = (e + 1) % 12;
+    out.push(e === m ? MONTHS[m] : MONTHS[m] + "–" + MONTHS[e]);
+  }
+  return out.join(", ");
+}
+
+/* For one month: cells nearest the target, each represented by its largest
+   place that passes the filters. The anchor's own surroundings are left out —
+   home gets its own verdict — and results are spread out: one per ~1 degree
+   cell and at most two per country, so a month is a choice, not one coast.
+
+   Then, among candidates that match about equally well (within one step of the
+   best), a recognisable town beats a hamlet: each tenfold drop below a million
+   people costs a third of a step. Climate still decides who is in the running;
+   size only orders near-equals, as it does for ties everywhere else. */
+var sizeCost = function (pop) {
+  return Math.max(0, 6 - Math.log(Math.max(pop, 1)) / Math.LN10) / 3;
+};
+function chaseMatches(target, m, pass, n, home) {
+  var C = CLIM.cells, d = new Float32Array(C), order = new Array(C), c;
+  for (c = 0; c < C; c++) { d[c] = chaseDist(climateAt(c, m), target); order[c] = c; }
+  order.sort(function (a, b) { return d[a] - d[b]; });
+
+  var cosl = Math.cos(LAT[home] * Math.PI / 180), seen = {}, perCountry = {}, out = [];
+  var limit = Infinity;
+  for (var o = 0; o < C && out.length < n * 8; o++) {
+    if (d[order[o]] > limit) break;
+    c = order[o];
+    var best = -1;
+    for (var j = CLIM.start[c]; j < CLIM.start[c + 1]; j++) {
+      var p = CLIM.members[j];
+      if (best >= 0 && rows[p][7] <= rows[best][7]) continue;
+      if (pass(p)) best = p;
+    }
+    if (best < 0) continue;
+    var gy = LAT[best] - LAT[home], gx = (LON[best] - LON[home]) * cosl;
+    if (gy * gy + gx * gx < 1.35 * 1.35) continue;          // ~150 km of home
+    var cell = Math.round(LAT[best]) + "/" + Math.round(LON[best]), cc = rows[best][4];
+    if (seen[cell] || (perCountry[cc] || 0) >= 6) continue;
+    seen[cell] = 1;
+    perCountry[cc] = (perCountry[cc] || 0) + 1;
+    if (!out.length) limit = Math.max(d[c] + 1, CHASE_STAY);
+    out.push({ idx: best, d: d[c], k: climateAt(c, m) });
+  }
+  // Country spread is re-applied after reordering, on the final picks.
+  out.sort(function (a, b) {
+    return (a.d + sizeCost(rows[a.idx][7])) - (b.d + sizeCost(rows[b.idx][7]));
+  });
+  var picked = [], per = {};
+  for (var q = 0; q < out.length && picked.length < n; q++) {
+    var k2 = rows[out[q].idx][4];
+    if ((per[k2] || 0) >= 2) continue;
+    per[k2] = (per[k2] || 0) + 1;
+    picked.push(out[q]);
+  }
+  return picked;
+}
+
+// What home is like in a month it falls short: the biggest gap, in words.
+function homeGap(k, target) {
+  var dt = k.t - target.t, dd = k.td - target.td, dr = k.rain - target.rain;
+  var gaps = [
+    [Math.abs(dt) / CHASE_STEP.t, fmtDelta(Math.abs(dt), "temperature").replace(/^\+/, "")
+      + "° " + (dt > 0 ? "warmer" : "colder")],
+    [Math.abs(dd) / CHASE_STEP.td, dd > 0 ? "muggier" : "drier air"],
+    [Math.abs(dr) / CHASE_STEP.rain, dr > 0 ? "wetter" : "drier"],
+  ].sort(function (a, b) { return b[0] - a[0]; });
+  return gaps[0][1] + (gaps[1][0] >= 1 ? ", " + gaps[1][1] : "");
+}
+
+var chaseSeq = 0;
+function showChase() {
+  var mine = ++chaseSeq;
+  if (!state.city) return show("start");
+  show("chase");
+  if (ctl("#chaseControls")) ctl("#chaseControls").paint();
+  else renderControls($("#chaseControls"), { measure: false, period: false, rerun: showChase });
+
+  var home = state.city.idx, homeCell = CLIM.cellOf[home], bm = bestMonths(home);
+  var tm = state.chaseMonth == null ? bm.best : state.chaseMonth;
+  var target = climateAt(homeCell, tm);
+  var u = state.fahrenheit ? "°F" : "°C";
+
+  $("#chaseTitle").textContent = "Keep " + state.city.name + "’s " + MONTH_NAMES[tm] + " all year";
+  $("#chaseSub").textContent = "Target: " + fmt(target.t, "temperature") + u + ", dew point "
+    + fmt(target.td, "dew_point") + u + ", " + Math.round(target.mm) + " mm of rain, wind "
+    + fmt(target.ws * 3.6, "wind") + " km/h · " + NORMALS + " normals";
+
+  // Target month picker; the place's pleasant months are marked.
+  var pick = $("#chaseMonths");
+  pick.innerHTML = "";
+  var good = setOf(bm.good);
+  MONTHS.forEach(function (name, m) {
+    var b = el("button", good[m] ? "good" : null, name);
+    b.type = "button";
+    b.setAttribute("aria-pressed", String(m === tm));
+    b.title = (good[m] ? "Pleasant in " : "") + state.city.name + " in " + MONTH_NAMES[m];
+    b.addEventListener("click", function () {
+      state.chaseMonth = m;
+      showChase();
+    });
+    pick.appendChild(b);
+  });
+
+  var box = $("#chaseResults");
+  box.innerHTML = "";
+  var stays = [], now = new Date().getMonth();
+
+  for (var i = 0; i < 12; i++) {
+    var m = (now + i) % 12;
+    // Range filters read each month's own figures: a July row, July air.
+    var mpass = rowFilter(activeBounds(m));
+    var homeK = climateAt(homeCell, m), hd = chaseDist(homeK, target);
+    var stay = hd <= CHASE_STAY;
+    if (stay) stays.push(m);
+    var picks = chaseMatches(target, m, mpass, stay ? 3 : 4, home);
+    if (mine !== chaseSeq) return;
+
+    var blk = el("section", "cm" + (stay ? " stay" : ""));
+    var head = el("div", "cm-head");
+    head.appendChild(el("b", "cm-month", MONTH_NAMES[m] + (i === 0 ? " · now" : "")));
+    head.appendChild(el("span", "cm-home", stay
+      ? "Stay in " + state.city.name + " — " + matchWord(hd).toLowerCase()
+      : state.city.name + " is " + homeGap(homeK, target) + " — go"));
+    blk.appendChild(head);
+
+    var list = el("div", "cm-picks");
+    if (!picks.length) list.appendChild(el("p", "meta", "Nothing matches the current filters this month."));
+    picks.forEach(function (pk) { list.appendChild(chaseCard(describe(pk.idx), pk, m)); });
+    blk.appendChild(list);
+    box.appendChild(blk);
+  }
+
+  $("#chasePlan").textContent = stays.length
+    ? "Stay home " + stays.length + " month" + (stays.length === 1 ? "" : "s")
+      + " (" + monthRuns(stays) + "). For the other " + (12 - stays.length)
+      + ", these are the closest matches on Earth."
+    : state.city.name + " never quite matches its own " + MONTH_NAMES[tm]
+      + " in another month — every month below is a move.";
+
+  $("#chaseSource").textContent = "Matched on temperature, dew point, rainfall and wind, "
+    + "month by month, across all " + N.toLocaleString() + " places. One step is 2° of "
+    + "temperature or dew point, ~6 km/h of wind, or a modest change in rain; "
+    + "“stay” means home is within " + CHASE_STAY + " steps. Entry rules for a "
+    + countryName(state.passport) + " passport. ERA5 " + NORMALS + " normals, 0.25° grid.";
+  syncHash();
+}
+
+function chaseCard(c, pk, m) {
+  var card = el("div", "cmc");
+  var air = PM25 ? PM25.month[m][c.idx] : Infinity, code = visaCode(c.cc);
+  card.innerHTML =
+    '<div class="cmc-top"><b>' + c.name + "</b>" + livBadge(c.cc) + "</div>"
+    + '<div class="wh">' + [c.region, c.country].filter(Boolean).join(", ") + "</div>"
+    + '<div class="cmc-k">' + fmt(pk.k.t, "temperature") + "°"
+      + ' <i>dew ' + fmt(pk.k.td, "dew_point") + "°</i>"
+      + " <i>" + Math.round(pk.k.mm) + " mm</i>"
+      + (isFinite(air) ? " <i>PM2.5 " + air.toFixed(0) + "</i>" : "") + "</div>"
+    + '<div class="cmc-foot"><span class="cmc-match">' + matchWord(pk.d) + "</span>"
+      + (code ? '<span class="cmc-visa v' + code + '">' + VISA_WORDS[code] + "</span>" : "")
+      + linksFor(c) + "</div>";
+  card.tabIndex = 0;
+  card.title = "Open " + c.name;
+  var open = function (ev) {
+    if (ev.target.closest("a")) return;
+    selectCity(c);
+  };
+  card.addEventListener("click", open);
+  card.addEventListener("keydown", function (ev) { if (ev.key === "Enter") open(ev); });
+  return card;
+}
+
+/* On the place page: when this place is at its best, and the way in to
+   following that weather around the year. */
+function renderChaseCta(city) {
+  var box = $("#placeChase");
+  if (!box) return;
+  var bm = bestMonths(city.idx), k = climateAt(CLIM.cellOf[city.idx], bm.best);
+  var u = state.fahrenheit ? "°F" : "°C";
+  box.innerHTML = "";
+  var txt = el("div", "pc-txt");
+  txt.innerHTML = bm.good.length
+    ? "<b>" + city.name + " is at its best " + monthRuns(bm.good) + ".</b> "
+      + "In " + MONTH_NAMES[bm.best] + " it averages " + fmt(k.t, "temperature") + u
+      + " with a " + fmt(k.td, "dew_point") + u + " dew point."
+    : "<b>No month in " + city.name + " is mild by the usual measures.</b> Its most "
+      + "comfortable is " + MONTH_NAMES[bm.best] + ", at " + fmt(k.t, "temperature") + u + ".";
+  box.appendChild(txt);
+  var go = el("button", "primary", "Follow " + MONTH_NAMES[bm.best] + " in " + city.name + " all year →");
+  go.type = "button";
+  go.addEventListener("click", function () { state.chaseMonth = bm.best; showChase(); });
+  box.appendChild(go);
+}
+
 /* ------------------------------------------------------------------ chrome */
 
 /* Which screen is up, and how to redraw it. Everything that changes the whole
@@ -2031,6 +2181,7 @@ function currentScreen() {
   if (!$("#compare").hidden) return { ctl: "#cmpControls", rerun: runCompare };
   if (!$("#favs").hidden) return { ctl: "#favControls", rerun: showFavourites };
   if (!$("#overall").hidden) return { ctl: "#ovControls", rerun: showOverall };
+  if (!$("#chase").hidden) return { ctl: "#chaseControls", rerun: showChase };
   return null;
 }
 
@@ -2063,7 +2214,79 @@ function renderRecents() {
   });
 }
 
+/* ------------------------------------------------------------ passport */
+
+var passportSel = $("#passport");
+Object.keys(LIV.passports)
+  .map(function (cc) { return [cc, countryName(cc)]; })
+  .sort(function (a, b) { return a[1] < b[1] ? -1 : 1; })
+  .forEach(function (p) {
+    var op = el("option", null, p[1] + " passport");
+    op.value = p[0];
+    passportSel.appendChild(op);
+  });
+passportSel.addEventListener("change", function () { setPassport(passportSel.value); });
+
+// Everything that shows settling in or entry rules is redrawn for the new passport.
+function paintPassport() {
+  passportSel.value = state.passport;
+  passportSel.title = "Settling-in scores and entry filters are for a "
+    + countryName(state.passport) + " passport";
+  var scr = currentScreen();
+  if (scr) scr.rerun();
+  else if (!$("#profile").hidden && state.city) selectCity(state.city);
+  syncHash();
+}
+
+/* --------------------------------------------------------- shareable links */
+
+/* The address bar carries the selection, so any screen can be sent to someone
+   and opens on the same place, measure, month and passport. Works from file://
+   as well as from a web server. */
+var SCREENS = ["profile", "compare", "chase", "overall", "favs"];
+function syncHash() {
+  if (!state.city) return;
+  var scr = "profile";
+  SCREENS.forEach(function (n) { if (!$("#" + n).hidden) scr = n; });
+  var q = ["p=" + state.city.id, "v=" + scr, "m=" + state.metric, "t=" + state.period,
+           "pp=" + state.passport];
+  if (scr === "chase" && state.chaseMonth != null) q.push("tm=" + state.chaseMonth);
+  if (state.entry !== "any") q.push("e=" + state.entry);
+  var h = "#" + q.join("&");
+  if (location.hash === h) return;
+  try { history.replaceState(null, "", h); } catch (e) { /* sandboxed: harmless */ }
+}
+
+function readHash() {
+  var q = {};
+  location.hash.replace(/^#/, "").split("&").forEach(function (kv) {
+    var i = kv.indexOf("=");
+    if (i > 0) q[kv.slice(0, i)] = decodeURIComponent(kv.slice(i + 1));
+  });
+  if (!q.p) return null;
+  var id = +q.p, at = -1;
+  for (var i = 0; i < N; i++) if (rows[i][0] === id) { at = i; break; }
+  if (at < 0) return null;
+  if (METRICS[q.m]) state.metric = q.m;
+  if (q.t != null && +q.t >= -1 && +q.t <= 11) state.period = +q.t;
+  if (LIV.passports[q.pp]) state.passport = q.pp;
+  if (ENTRY[q.e]) state.entry = q.e;
+  return { city: describe(at), screen: q.v, tm: q.tm != null ? +q.tm : null };
+}
+
+$("#copyLink").addEventListener("click", function () {
+  syncHash();
+  var b = $("#copyLink"), done = function (t) {
+    b.textContent = t;
+    setTimeout(function () { b.textContent = "Copy link"; }, 1600);
+  };
+  if (navigator.clipboard) navigator.clipboard.writeText(location.href)
+    .then(function () { done("Copied"); }, function () { done("Copy failed"); });
+  else done("Copy the address bar");
+});
+
 $("#ovBtn").addEventListener("click", showOverall);
+$("#chaseBtn").addEventListener("click", function () { showChase(); });
 $("#favBtn").addEventListener("click", showFavourites);
 $("#sbFav").addEventListener("click", function () {
   if (state.city) { toggleFav(state.city); paintFavStar(state.city); paintStatus(); }
@@ -2080,9 +2303,27 @@ $("#sbClear").addEventListener("click", function () {
 paintFavCount();
 renderRecents();
 $("#q").disabled = false;
-note(N.toLocaleString() + " places ready. Climate data loads when you pick a figure.");
+note(N.toLocaleString() + " places · ten years of climate · entry rules for "
+  + Object.keys(LIV.passports).length + " passports.");
 
-// A refresh should land you back where you were, not re-ask for permission.
-if (state.city && typeof state.city.idx === "number") selectCity(state.city);
+passportSel.value = state.passport;
+
+// A shared link opens what was shared; otherwise a refresh lands you back
+// where you were, without re-asking for location.
+function openLink() {
+  var link = readHash();
+  if (!link) return false;
+  passportSel.value = state.passport;
+  LIV_VALUES = null;
+  selectCity(link.city);
+  if (link.screen === "chase") { state.chaseMonth = link.tm; showChase(); }
+  else if (link.screen === "compare") openCompare(state.metric);
+  else if (link.screen === "overall") showOverall();
+  else if (link.screen === "favs") showFavourites();
+  return true;
+}
+// A link pasted into a tab that already has Livably open changes only the hash.
+window.addEventListener("hashchange", openLink);
+if (!openLink() && state.city && typeof state.city.idx === "number") selectCity(state.city);
 
 })();

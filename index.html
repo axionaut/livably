@@ -3,7 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Livably</title>
+  <title>Livably — keep the weather you love, all year</title>
+  <meta name="description" content="Find where on Earth has the climate you love in every month of the year, filtered by what your passport lets you enter. Ten years of ERA5 climate for 235,000 places.">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -70,9 +71,12 @@
     <span class="bs-item bs-filters" id="sbFilters"></span>
     <button class="sb-btn" id="sbFav" type="button"></button>
     <button class="sb-btn" id="sbClear" type="button" hidden>Clear filters</button>
+    <button class="sb-btn" id="copyLink" type="button" title="Copy a link to exactly this view">Copy link</button>
   </div>
 
   <div class="bar-right">
+    <select id="passport" class="pill" aria-label="Your passport"></select>
+    <button id="chaseBtn" class="pill" title="Keep one climate all year: where to be, month by month">Follow the weather</button>
     <button id="ovBtn" class="pill" title="Overall ranking across all parameters">Overall</button>
     <button id="favBtn" class="pill" title="Favourites">&#9734;</button>
     <button id="unit" class="pill" title="Toggle units">°C</button>
@@ -81,10 +85,10 @@
 
 <section id="start" class="screen">
   <div class="hero">
-    <h1>Where else feels like this?</h1>
-    <p class="sub">Pick a place, pick a measure &mdash; climate, air, or how easily you could
-       settle &mdash; and see the places on Earth sitting closest to that exact
-       value.</p>
+    <h1>Keep the weather you love, all year.</h1>
+    <p class="sub">Pick a place at its best &mdash; Lisbon in June, Bangalore in
+       February, home in spring. Livably finds where on Earth has that same climate
+       in every other month, among places your passport can actually get you into.</p>
 
     <div class="entry">
       <button id="locate" class="primary">Use my location</button>
@@ -110,6 +114,7 @@
     <div id="placeExtras" class="place-extras"></div>
     <div id="placeSimilar" class="place-similar"></div>
   </div>
+  <div id="placeChase" class="place-chase"></div>
   <p class="hint">Click any figure to find the places closest to it.</p>
   <div id="metricGrid" class="grid"></div>
   <p class="source" id="profileSource"></p>
@@ -128,6 +133,24 @@
   <div id="ovProgress" class="progress" hidden><span class="spin"></span><span>Scoring every place&hellip;</span></div>
   <div id="ovResults" class="results"></div>
   <p class="source" id="ovSource"></p>
+</section>
+
+<section id="chase" class="screen" hidden>
+  <button class="back" data-goto="profile">&larr; Back to place</button>
+  <div class="cmp-head">
+    <div>
+      <h2 id="chaseTitle"></h2>
+      <p id="chaseSub" class="meta"></p>
+    </div>
+  </div>
+  <div class="ctl-row">
+    <span class="ctl-k">Target</span>
+    <div class="periods" id="chaseMonths"></div>
+  </div>
+  <div class="controls" id="chaseControls"></div>
+  <p id="chasePlan" class="chase-plan"></p>
+  <div id="chaseResults" class="chase-results"></div>
+  <p class="source" id="chaseSource"></p>
 </section>
 
 <section id="favs" class="screen" hidden>
@@ -173,6 +196,7 @@
 
 <!-- Plain scripts, not modules: file:// blocks module scripts and fetch(). -->
 <script src="data/cities.js"></script>
+<script src="data/climate.js"></script>
 <script src="data/pm25.js"></script>
 <script src="data/liveability.js"></script>
 <script src="app.js"></script>
